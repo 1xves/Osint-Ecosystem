@@ -119,7 +119,6 @@ class IllicitAgent(BaseAgent):
     async def run(self, state: dict[str, Any]) -> dict[str, Any]:
         city_name = state["city_name"]
         run_id = state["run_id"]
-        existing_raw_entities = state.get("raw_entities", [])
         pass_number = state.get("pass_number", 1)
 
         log.info(
@@ -147,14 +146,10 @@ class IllicitAgent(BaseAgent):
         )
 
         patch: dict[str, Any] = {
-            "raw_entities": existing_raw_entities + new_raw_entities,
-            **self.agent_status_patch("success", state.get("agent_statuses", {})),
-            **self.token_count_patch(
-                state.get("total_tokens_in", 0),
-                state.get("total_tokens_out", 0),
-                state.get("agent_token_counts", {}),
-            ),
-            **self.entity_count_patch(state.get("agent_entity_counts", {})),
+            "raw_entities": new_raw_entities,          # delta only
+            **self.agent_status_patch("success"),
+            **self.token_count_patch(),
+            **self.entity_count_patch(),
         }
         return patch
 

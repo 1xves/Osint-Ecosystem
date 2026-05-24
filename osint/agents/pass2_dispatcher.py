@@ -171,16 +171,19 @@ class Pass2Dispatcher(BaseAgent):
         )
 
         # ── Merge results ─────────────────────────────────────────────────────
-        # Baseline token counts (same for all, since all started from pass2_state)
-        baseline_tokens_in  = pass2_state.get("total_tokens_in", 0)
-        baseline_tokens_out = pass2_state.get("total_tokens_out", 0)
+        # After base.py was changed to return DELTAS:
+        #   - result["total_tokens_in"] is the agent's own token count (delta), NOT cumulative
+        #   - result["agent_statuses"] is {agent_name: status} (single-key dict, delta)
+        #   - result["agent_token_counts"] is {agent_name: tokens} (single-key dict, delta)
+        # We aggregate manually here since these agents run outside LangGraph's
+        # reducer machinery (they're called directly via asyncio.gather).
         tokens_in_delta  = 0
         tokens_out_delta = 0
 
-        # Start from existing tracking dicts; agents only update their own entries
-        merged_statuses      = dict(pass2_state.get("agent_statuses", {}))
-        merged_token_counts  = dict(pass2_state.get("agent_token_counts", {}))
-        merged_entity_counts = dict(pass2_state.get("agent_entity_counts", {}))
+        # Collect pass2 agent deltas into combined dicts
+        merged_statuses      = {}
+        merged_token_counts  = {}
+        merged_entity_counts = {}
 
         # New entities from each agent — delta-based (all started from same baseline)
         all_new_entities: list[dict[str, Any]] = []
@@ -198,21 +201,16 @@ class Pass2Dispatcher(BaseAgent):
                 merged_statuses[agent_name] = "error"
                 continue
 
-            # Extract ONLY the new entities from this agent (delta from baseline).
-            # Each agent returns: raw_entities = baseline + new_entities.
-            # Therefore: new_entities = result["raw_entities"][baseline_entity_count:]
-            result_entities = result.get("raw_entities", [])
-            new_entities = result_entities[baseline_entity_count:]
+            # Agents now return DELTA raw_entities (just their new finds).
+            new_entities = result.get("raw_entities", [])
             all_new_entities.extend(new_entities)
             agent_new_entity_counts[agent_name] = len(new_entities)
 
-            # Token delta: result contains (baseline_tokens + agent_tokens)
-            agent_delta_in  = result.get("total_tokens_in",  baseline_tokens_in)  - baseline_tokens_in
-            agent_delta_out = result.get("total_tokens_out", baseline_tokens_out) - baseline_tokens_out
-            tokens_in_delta  += max(agent_delta_in,  0)
-            tokens_out_delta += max(agent_delta_out, 0)
+            # Token counts are already deltas (agent's own usage only, not cumulative)
+            tokens_in_delta  += result.get("total_tokens_in",  0)
+            tokens_out_delta += result.get("total_tokens_out", 0)
 
-            # Merge per-agent tracking (each agent only writes its own key)
+            # Merge per-agent tracking (each result is a single-key delta dict)
             if "agent_statuses" in result:
                 merged_statuses.update(result["agent_statuses"])
             if "agent_token_counts" in result:
@@ -251,27 +249,23 @@ class Pass2Dispatcher(BaseAgent):
             total_new=total_new,
         )
 
-        # ── Build state patch ─────────────────────────────────────────────────
-        # Merge new entities on top of baseline (not pass2_state["raw_entities"]
-        # which is the same list — just explicitly clear)
-        final_raw_entities = list(state.get("raw_entities", [])) + all_new_entities
-
-        # Add dispatcher itself to agent_statuses
-        dispatcher_status_patch = self.agent_status_patch(
-            "success",
-            merged_statuses,
-        )
+        # ── Build state patch (DELTA only — reducers handle accumulation) ───────
+        # raw_entities: return only new pass-2 entities (operator.add reducer appends)
+        # agent_statuses: combined dict of all pass2 agents + dispatcher own entry
+        # token counts: deltas only (reducers accumulate)
+        # Do NOT spread **state — that would feed existing list/int fields back
+        # through their reducers and double-count everything.
+        merged_statuses[self.AGENT_NAME] = "success"
 
         return {
-            **state,
-            "raw_entities":        final_raw_entities,
+            "raw_entities":        all_new_entities,  # delta: new entities from pass 2 only
             "pass_number":         2,
             "current_phase":       "RESOLUTION",
-            "agent_statuses":      dispatcher_status_patch["agent_statuses"],
+            "agent_statuses":      merged_statuses,   # delta: all pass2 agents + dispatcher
             "agent_token_counts":  merged_token_counts,
             "agent_entity_counts": merged_entity_counts,
-            "total_tokens_in":     baseline_tokens_in  + tokens_in_delta,
-            "total_tokens_out":    baseline_tokens_out + tokens_out_delta,
+            "total_tokens_in":     tokens_in_delta,   # delta: pass2 tokens only
+            "total_tokens_out":    tokens_out_delta,
         }
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -284,7 +278,7 @@ class Pass2Dispatcher(BaseAgent):
         Routes directly to resolution with current state unchanged.
         """
         return {
-            **self.agent_status_patch("success", state.get("agent_statuses", {})),
+            **self.agent_status_patch("success"),
             "pass_number":   2,
             "current_phase": "RESOLUTION",
         }

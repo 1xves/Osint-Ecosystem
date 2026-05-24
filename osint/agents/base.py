@@ -114,16 +114,10 @@ class BaseAgent(ABC):
         # Register agent as running in Redis for live status
         await self._redis.set_agent_status(self._run_id, self.AGENT_NAME, "running")
 
-        # Create agent_output record in DB
+        # Reserve output_id — the DB row is written on completion (success or error).
+        # agent_outputs only accepts terminal statuses; 'running' state lives in Redis only.
         self._output_id = str(uuid.uuid4())
-        await self._db.write_agent_output({
-            "output_id": self._output_id,
-            "run_id": self._run_id,
-            "agent_name": self.AGENT_NAME,
-            "agent_status": "running",
-            "prompt_version": self.AGENT_VERSION,
-            "started_at": datetime.now(timezone.utc).isoformat(),
-        })
+        self._started_at_iso = datetime.now(timezone.utc).isoformat()
 
         try:
             patch = await self.run(state)
@@ -306,46 +300,54 @@ class BaseAgent(ABC):
     def agent_status_patch(
         self,
         status: str,
-        existing_statuses: dict[str, str],
+        existing_statuses: dict[str, str] | None = None,  # kept for call-site compat; ignored
         errors: list[str] | None = None,
-        existing_errors: dict[str, str] | None = None,
+        existing_errors: dict[str, str] | None = None,    # kept for call-site compat; ignored
     ) -> dict[str, Any]:
-        """Build the agent status + error patch dict."""
+        """
+        Build a DELTA agent status patch.
+
+        Returns only this agent's own key so the LangGraph _merge_dicts reducer
+        can merge contributions from all parallel collection agents without
+        INVALID_CONCURRENT_GRAPH_UPDATE.
+
+        existing_statuses / existing_errors are accepted but ignored — merging
+        is handled by the reducer, not by the caller.
+        """
         patch: dict[str, Any] = {
-            "agent_statuses": {**existing_statuses, self.AGENT_NAME: status},
+            "agent_statuses": {self.AGENT_NAME: status},
         }
-        if errors and existing_errors is not None:
-            merged_errors = dict(existing_errors)
-            merged_errors[self.AGENT_NAME] = "; ".join(errors)
-            patch["agent_errors"] = merged_errors
+        if errors:
+            patch["agent_errors"] = {self.AGENT_NAME: "; ".join(errors)}
         return patch
 
     def token_count_patch(
         self,
-        existing_tokens_in: int,
-        existing_tokens_out: int,
-        existing_agent_token_counts: dict[str, int],
+        existing_tokens_in: int = 0,             # kept for call-site compat; ignored
+        existing_tokens_out: int = 0,            # kept for call-site compat; ignored
+        existing_agent_token_counts: dict[str, int] | None = None,  # ignored
     ) -> dict[str, Any]:
-        """Build token count update patch."""
+        """
+        Build a DELTA token count patch.
+
+        Returns only this agent's contribution; _add_int / _merge_dicts reducers
+        accumulate across all parallel agents.
+        """
         return {
-            "total_tokens_in": existing_tokens_in + self._tokens_in,
-            "total_tokens_out": existing_tokens_out + self._tokens_out,
+            "total_tokens_in": self._tokens_in,
+            "total_tokens_out": self._tokens_out,
             "agent_token_counts": {
-                **existing_agent_token_counts,
                 self.AGENT_NAME: self._tokens_in + self._tokens_out,
             },
         }
 
     def entity_count_patch(
         self,
-        existing_counts: dict[str, int],
+        existing_counts: dict[str, int] | None = None,  # kept for call-site compat; ignored
     ) -> dict[str, Any]:
-        """Build agent entity count patch."""
+        """Build a DELTA agent entity count patch."""
         return {
-            "agent_entity_counts": {
-                **existing_counts,
-                self.AGENT_NAME: self._entities_produced,
-            }
+            "agent_entity_counts": {self.AGENT_NAME: self._entities_produced}
         }
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -369,6 +371,9 @@ class BaseAgent(ABC):
             "run_id":                 self._run_id,
             "agent_name":             self.AGENT_NAME,
             "agent_status":           "success",
+            "model_used":             settings.ollama_default_model,
+            "prompt_version":         self.AGENT_VERSION,
+            "started_at":             self._started_at_iso,
             "tokens_in":              self._tokens_in,
             "tokens_out":             self._tokens_out,
             "llm_call_count":         self._llm_calls,
@@ -385,27 +390,28 @@ class BaseAgent(ABC):
         await self._redis.set_agent_status(self._run_id, self.AGENT_NAME, "error")
         elapsed_ms = int((time.monotonic() - self._started_at) * 1000)
         await self._db.write_agent_output({
-            "output_id":    self._output_id,
-            "run_id":       self._run_id,
-            "agent_name":   self.AGENT_NAME,
-            "agent_status": "error",
-            "error_message": error_message[:1000],
-            "tokens_in":    self._tokens_in,
-            "tokens_out":   self._tokens_out,
-            "latency_ms":   elapsed_ms,
-            "completed_at": datetime.now(timezone.utc).isoformat(),
+            "output_id":      self._output_id,
+            "run_id":         self._run_id,
+            "agent_name":     self.AGENT_NAME,
+            "agent_status":   "error",
+            "model_used":     settings.ollama_default_model,
+            "prompt_version": self.AGENT_VERSION,
+            "started_at":     self._started_at_iso,
+            "error_message":  error_message[:1000],
+            "tokens_in":      self._tokens_in,
+            "tokens_out":     self._tokens_out,
+            "latency_ms":     elapsed_ms,
+            "completed_at":   datetime.now(timezone.utc).isoformat(),
         })
 
     def _error_patch(self, state: dict[str, Any], error_message: str) -> dict[str, Any]:
+        """
+        Returns a DELTA error patch — only this agent's own keys.
+        _merge_dicts reducer handles merging with existing state.
+        """
         return {
-            "agent_statuses": {
-                **state.get("agent_statuses", {}),
-                self.AGENT_NAME: "error",
-            },
-            "agent_errors": {
-                **state.get("agent_errors", {}),
-                self.AGENT_NAME: error_message,
-            },
+            "agent_statuses": {self.AGENT_NAME: "error"},
+            "agent_errors":   {self.AGENT_NAME: error_message},
         }
 
     # ─────────────────────────────────────────────────────────────────────────

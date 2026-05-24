@@ -11,7 +11,26 @@ Usage:
 """
 
 from __future__ import annotations
-from typing import TypedDict, Literal, Optional, Any
+import operator
+from typing import Annotated, TypedDict, Literal, Optional, Any
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Reducer helpers — used by Annotated field declarations below
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _merge_dicts(a: dict, b: dict) -> dict:
+    """
+    LangGraph reducer for dict fields written by concurrent agents.
+    b's keys overwrite a's — each agent only writes its own AGENT_NAME key,
+    so there is no conflict between parallel nodes.
+    """
+    return {**a, **b}
+
+
+def _add_int(a: int, b: int) -> int:
+    """LangGraph reducer for integer accumulator fields."""
+    return a + b
 
 
 class OSINTRunState(TypedDict, total=False):
@@ -47,16 +66,22 @@ class OSINTRunState(TypedDict, total=False):
     framings: list[dict[str, Any]]       # 4 perspective framings — see FramingObject below
 
     # ─── Agent Status Tracking ────────────────────────────────────────────────
-    agent_statuses: dict[str, str]       # agent_name → "pending"|"running"|"success"|"error"|"timeout"|"skipped"
-    agent_errors: dict[str, str]         # agent_name → error message (if failed)
-    agent_entity_counts: dict[str, int]  # agent_name → entities produced this run
-    agent_token_counts: dict[str, int]   # agent_name → total tokens used
+    # These four dicts are written by ALL parallel collection agents simultaneously.
+    # _merge_dicts reducer merges partial dicts ({agent_name: value}) from each
+    # concurrent node so LangGraph doesn't raise INVALID_CONCURRENT_GRAPH_UPDATE.
+    # Each agent MUST return only its own key (delta), not the full merged dict.
+    agent_statuses: Annotated[dict[str, str], _merge_dicts]       # agent_name → status
+    agent_errors: Annotated[dict[str, str], _merge_dicts]         # agent_name → error message
+    agent_entity_counts: Annotated[dict[str, int], _merge_dicts]  # agent_name → entity count
+    agent_token_counts: Annotated[dict[str, int], _merge_dicts]   # agent_name → total tokens
 
     # ─── Phase 1 Output: Raw Collection ───────────────────────────────────────
     # All raw_entities are pre-resolution — multiple agents may have extracted
     # the same entity under different names. Resolution de-duplicates.
-    raw_entities: list[dict[str, Any]]          # All extracted entities, all agents
-    raw_search_records: list[dict[str, Any]]    # All search attempts (also written to DB immediately)
+    # operator.add reducer concatenates each agent's contribution list.
+    # Agents MUST return only their NEW entities (delta), not existing + new.
+    raw_entities: Annotated[list[dict[str, Any]], operator.add]          # All extracted entities
+    raw_search_records: Annotated[list[dict[str, Any]], operator.add]    # All search attempts
     pipeline_agent_output: dict[str, Any]       # Structured output from localhost:5050
 
     # ─── Gap Analysis ─────────────────────────────────────────────────────────
@@ -89,12 +114,12 @@ class OSINTRunState(TypedDict, total=False):
 
     # ─── Operational ──────────────────────────────────────────────────────────
     rate_limit_state: dict[str, dict[str, Any]]  # domain → {requests_made, remaining, reset_at, daily_budget}
-    redis_cache_hits: int
+    redis_cache_hits: Annotated[int, _add_int]
     proxycurl_spend_usd: float           # Running cost — agent stops if > budget
-    total_tokens_in: int                 # Aggregate across all LLM calls this run
-    total_tokens_out: int
-    warnings: list[str]                  # Non-fatal issues
-    errors: list[str]                    # Any error here blocks final report
+    total_tokens_in: Annotated[int, _add_int]    # Aggregate across all LLM calls this run
+    total_tokens_out: Annotated[int, _add_int]
+    warnings: Annotated[list[str], operator.add]  # Non-fatal issues
+    errors: Annotated[list[str], operator.add]    # Any error here blocks final report
 
 
 # ─────────────────────────────────────────────────────────────────────────────

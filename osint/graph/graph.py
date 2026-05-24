@@ -104,8 +104,7 @@ async def collection_gate(state: OSINTRunState) -> OSINTRunState:
         "illicit_agent", "pipeline_agent",
     ]
 
-    errors = []
-    warnings = list(state.get("warnings", []))
+    new_warnings: list[str] = []
 
     for agent_name in collection_agents:
         status = agent_statuses.get(agent_name, "skipped")
@@ -115,7 +114,7 @@ async def collection_gate(state: OSINTRunState) -> OSINTRunState:
                 f"Collection agent '{agent_name}' finished with status '{status}'. "
                 f"Analytical phase will proceed with partial data."
             )
-            warnings.append(msg)
+            new_warnings.append(msg)
             log.warning("collection_gate: %s", msg)
 
     # Gate is always cleared at this point — collection errors are non-fatal
@@ -124,12 +123,18 @@ async def collection_gate(state: OSINTRunState) -> OSINTRunState:
         len(state.get("raw_entities", [])),
     )
 
-    return {
-        **state,
-        "gate_cleared": True,
+    # Return DELTA only — do NOT spread **state.
+    # Annotated reducer fields (raw_entities, agent_statuses, etc.) are already
+    # accumulated by the LangGraph reducers during the parallel collection step.
+    # Spreading **state here would feed those complete lists back through the
+    # operator.add reducer and double every entry.
+    patch: dict[str, Any] = {
+        "gate_cleared":  True,
         "current_phase": "GAP_ANALYSIS",
-        "warnings": warnings,
     }
+    if new_warnings:
+        patch["warnings"] = new_warnings   # reducer appends these to existing warnings
+    return patch
 
 
 # ─────────────────────────────────────────────────────────────────────────────
