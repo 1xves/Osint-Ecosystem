@@ -183,8 +183,7 @@ class PhilanthropicAgent(BaseAgent):
         try:
             response = await self._propublica.search_nonprofits(
                 query=city_name,
-                state_abbr=None,  # State abbr not always known; filter by name
-                ntee=6,           # NTEE major group 6 = Philanthropy, Voluntarism, Grantmaking
+                ntee="6",  # NTEE major group 6 = Philanthropy, Voluntarism, Grantmaking
             )
         except Exception as e:
             log.warning("PhilanthropicAgent: ProPublica search failed: %s", e)

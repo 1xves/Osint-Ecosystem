@@ -381,9 +381,8 @@ class IllicitAgent(BaseAgent):
         search_start = time.monotonic()
         try:
             response = await self._court.search_cases(
-                q=query,
-                type="r",  # "r" = RECAP/federal cases
-                order_by="score desc",
+                query=query,
+                case_type="recap",  # RECAP = federal cases
             )
         except Exception as e:
             log.warning("IllicitAgent: CourtListener search failed: %s", e)

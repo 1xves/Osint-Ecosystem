@@ -371,7 +371,7 @@ class NonprofitAgent(BaseAgent):
         try:
             # Search for grants (not contracts) to nonprofit recipients
             response = await self._usaspending.search_grants(
-                city=city_name,
+                recipient_name=city_name,
                 limit=20,
             )
         except Exception as e:

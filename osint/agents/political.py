@@ -180,8 +180,7 @@ class PoliticalAgent(BaseAgent):
         search_start = time.monotonic()
         try:
             response = await self._fec.search_committees(
-                q=city_name,
-                committee_type=["N", "O", "Q", "I"],  # PAC types
+                name=city_name,
                 per_page=25,
             )
         except Exception as e:
@@ -370,7 +369,7 @@ class PoliticalAgent(BaseAgent):
         search_start = time.monotonic()
         try:
             # OpenSecrets org summary search — no direct city filter, use keyword
-            response = await self._opensecrets.get_orgs(org=city_name, limit=10)
+            response = await self._opensecrets.get_org_summary(org_name=city_name)
         except Exception as e:
             log.warning("PoliticalAgent: OpenSecrets search failed: %s", e)
             await self.write_search_record(

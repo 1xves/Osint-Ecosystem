@@ -122,6 +122,27 @@ class EdgarClient:
             hits_size=10,
         )
 
+    async def search_filings(
+        self,
+        query: str,
+        form_type: str | None = None,
+        hits_size: int = 20,
+    ) -> dict[str, Any]:
+        """
+        Search EDGAR filings by keyword and optional form type.
+        Thin wrapper around search() for agent convenience.
+
+        Args:
+            query: Search terms (name, city, keyword).
+            form_type: SEC form type, e.g. "4", "10-K", "DEF 14A".
+            hits_size: Number of results to return.
+
+        Returns:
+            Raw EDGAR EFTS response with hits array.
+        """
+        forms = [form_type] if form_type else None
+        return await self.search(query=query, forms=forms, hits_size=hits_size)
+
     def get_filing_document_url(self, accession_number: str, cik: str, document_name: str) -> str:
         """
         Build the direct URL for a specific EDGAR filing document.

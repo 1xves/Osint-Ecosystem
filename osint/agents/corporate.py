@@ -385,7 +385,6 @@ class CorporateAgent(BaseAgent):
             response = await self._edgar.search_company_name(
                 name=city_name,
                 city=city_name,
-                form_type="10-K",
             )
         except Exception as e:
             log.warning("CorporateAgent: EDGAR search failed: %s", e)
@@ -536,9 +535,8 @@ class CorporateAgent(BaseAgent):
         search_start = time.monotonic()
         try:
             response = await self._opencorporates.search_companies(
-                query=city_name,
+                name=city_name,
                 jurisdiction_code="us",
-                registered_address=city_name,
             )
         except Exception as e:
             log.warning("CorporateAgent: OpenCorporates search failed: %s", e)

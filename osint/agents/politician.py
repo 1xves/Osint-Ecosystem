@@ -237,7 +237,7 @@ class PoliticianAgent(BaseAgent):
         for chamber in CHAMBERS:
             search_start = time.monotonic()
             try:
-                response = await self._propublica.get_congress_members(
+                response = await self._propublica.get_current_members(
                     chamber=chamber,
                     state=state_abbr,
                     congress=118,  # 118th Congress (2023-2024) — update this periodically
@@ -425,7 +425,7 @@ class PoliticianAgent(BaseAgent):
 
         search_start = time.monotonic()
         try:
-            response = await self._fec.get_candidates(
+            response = await self._fec.search_candidates(
                 state=state_abbr,
                 cycle=2024,
                 per_page=20,
