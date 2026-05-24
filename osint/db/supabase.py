@@ -761,7 +761,11 @@ class SupabaseClient:
         param_idx = 1
 
         if city_key:
-            conditions.append(f"city_key = ${param_idx}")
+            # entities have no city_key column — filter via agent_runs join
+            conditions.append(
+                f"EXISTS (SELECT 1 FROM agent_runs ar "
+                f"WHERE ar.run_id = ANY(source_run_ids) AND ar.city_key = ${param_idx})"
+            )
             params.append(city_key)
             param_idx += 1
 
@@ -785,7 +789,7 @@ class SupabaseClient:
 
         query = f"""
             SELECT
-                entity_id, canonical_name, entity_type, city_key,
+                entity_id, canonical_name, entity_type, primary_city,
                 overall_confidence, needs_review,
                 score_influence, score_partner_potential,
                 score_blocker_risk, score_competitor_potential,
@@ -814,7 +818,10 @@ class SupabaseClient:
         param_idx = 1
 
         if city_key:
-            conditions.append(f"city_key = ${param_idx}")
+            conditions.append(
+                f"EXISTS (SELECT 1 FROM agent_runs ar "
+                f"WHERE ar.run_id = ANY(source_run_ids) AND ar.city_key = ${param_idx})"
+            )
             params.append(city_key)
             param_idx += 1
         if entity_type:

@@ -234,7 +234,7 @@ class PhilanthropicAgent(BaseAgent):
                     continue
 
             ein = org.get("ein", "")
-            source_url = f"https://projects.propublica.org/nonprofits/organizations/{ein.replace('-', '')}" if ein else ""
+            source_url = f"https://projects.propublica.org/nonprofits/organizations/{str(ein).replace('-', '')}" if ein else ""
             revenue = org.get("income_amount")
             assets = org.get("asset_amount")
 

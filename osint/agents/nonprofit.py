@@ -222,7 +222,7 @@ class NonprofitAgent(BaseAgent):
                 subtype = self._infer_nonprofit_subtype(name_lower, org.get("ntee_code", ""))
                 ein = org.get("ein", "")
                 source_url = (
-                    f"https://projects.propublica.org/nonprofits/organizations/{ein.replace('-', '')}"
+                    f"https://projects.propublica.org/nonprofits/organizations/{str(ein).replace('-', '')}"
                     if ein else ""
                 )
 
