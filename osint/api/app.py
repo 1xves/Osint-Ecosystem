@@ -51,6 +51,7 @@ from osint.db.chromadb import ChromaDBClient
 from osint.db.neo4j import Neo4jClient
 from osint.db.redis import RedisClient
 from osint.db.supabase import SupabaseClient
+from osint.llm.ollama import OllamaClient
 from osint.llm.routing import LLMRouter
 
 log = logging.getLogger(__name__)
@@ -143,22 +144,32 @@ async def lifespan(app: FastAPI):
     neo4j = Neo4jClient()
     chroma = ChromaDBClient()
     redis = RedisClient()
-    rate_limiter = RateLimiter()
-    llm = LLMRouter()
+    ollama = OllamaClient()
 
     # Connect — errors here are fatal (app should not start without DB)
     await db.connect()
     await neo4j.connect()
-    await chroma.connect()
     await redis.connect()
+    await ollama.connect()
+
+    # ChromaDB is only used by the resolution agent — non-fatal if unavailable at startup
+    try:
+        await chroma.connect()
+        log.info("API startup: ChromaDB connected")
+    except Exception as exc:
+        log.warning("API startup: ChromaDB unavailable (%s) — resolution agent will degrade gracefully", exc)
+
+    # Dependents require connected clients — init after connect
+    rate_limiter = RateLimiter(redis.get_raw_client())
+    llm = LLMRouter(ollama)
 
     # Store on app.state for access in route handlers
-    app.state.db          = db
-    app.state.neo4j       = neo4j
-    app.state.chroma      = chroma
-    app.state.redis       = redis
+    app.state.db           = db
+    app.state.neo4j        = neo4j
+    app.state.chroma       = chroma
+    app.state.redis        = redis
     app.state.rate_limiter = rate_limiter
-    app.state.llm         = llm
+    app.state.llm          = llm
 
     # ARQ queue pool — used to enqueue pipeline jobs
     # If Redis is unavailable, queue_pool stays None and POST /runs returns 503
@@ -182,6 +193,7 @@ async def lifespan(app: FastAPI):
     await neo4j.disconnect()
     await chroma.disconnect()
     await redis.disconnect()
+    await ollama.disconnect()
     log.info("API shutdown: clean")
 
 
@@ -236,7 +248,7 @@ def _db(request_state: Any = None) -> SupabaseClient:
 async def health() -> dict[str, Any]:
     """Liveness check — no auth required. Returns DB connectivity status."""
     db_ok    = app.state.db._pool is not None
-    redis_ok = app.state.redis._client is not None
+    redis_ok = app.state.redis._redis is not None
     return {
         "status":     "ok" if (db_ok and redis_ok) else "degraded",
         "db":         "connected" if db_ok else "disconnected",
@@ -292,7 +304,7 @@ async def trigger_run(request: RunCreateRequest) -> RunCreateResponse:
             "model_default":     settings.ollama_default_model,
             "model_escalation":  settings.ollama_escalation_model,
             "triggered_by":      operator_id,
-            "trigger_type":      "api",
+            "trigger_type":      "manual",
             "is_delta_run":      False,
         })
     except Exception as exc:
@@ -301,12 +313,13 @@ async def trigger_run(request: RunCreateRequest) -> RunCreateResponse:
 
     # Enqueue to ARQ worker
     try:
-        await app.state.arq_pool.enqueue_job(
+        job = await app.state.arq_pool.enqueue_job(
             "run_osint_pipeline",
             run_id,
             request.city_name,
             request.country_or_region,
             operator_id,
+            _job_id=run_id,  # Use run_id as job_id — makes deduplication explicit
         )
     except Exception as exc:
         log.error("trigger_run: failed to enqueue job: %s", exc)
@@ -319,7 +332,30 @@ async def trigger_run(request: RunCreateRequest) -> RunCreateResponse:
         )
         raise HTTPException(status_code=500, detail="Failed to enqueue pipeline job")
 
-    log.info("trigger_run: run_id=%s city=%s enqueued", run_id, request.city_name)
+    if job is None:
+        # ARQ returns None when a job with the same _job_id already exists.
+        # This should not happen since run_id is a fresh UUID, but guard explicitly.
+        log.error(
+            "trigger_run: enqueue_job returned None for run_id=%s — "
+            "possible duplicate job_id or Redis key collision",
+            run_id,
+        )
+        await db.complete_run(
+            run_id=run_id,
+            status="failed",
+            summary={},
+            failure_reason="enqueue_job returned None — duplicate job_id",
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="Job enqueue returned None — possible duplicate job_id. "
+                   "This run_id was already enqueued.",
+        )
+
+    log.info(
+        "trigger_run: run_id=%s city=%s enqueued as arq_job_id=%s",
+        run_id, request.city_name, job.job_id,
+    )
 
     return RunCreateResponse(
         run_id=run_id,

@@ -269,8 +269,8 @@ class SupabaseClient:
                 entity["entity_type"],
                 entity.get("entity_subtype"),
                 entity.get("aliases", []),
-                entity.get("valid_from"),
-                entity.get("valid_to"),
+                self._coerce_dt(entity.get("valid_from")),
+                self._coerce_dt(entity.get("valid_to")),
                 entity.get("superseded_by"),
                 # External IDs
                 ext.get("crunchbase_id") or entity.get("crunchbase_id"),
@@ -303,8 +303,8 @@ class SupabaseClient:
                 entity.get("source_run_ids", []),
                 json.dumps(entity.get("merge_provenance", [])),
                 entity.get("source_urls", []),
-                entity.get("last_seen"),
-                entity.get("last_verified"),
+                self._coerce_dt(entity.get("last_seen")),
+                self._coerce_dt(entity.get("last_verified")),
                 # Confidence
                 entity.get("overall_confidence"),
                 entity.get("source_count", 0),
@@ -333,7 +333,7 @@ class SupabaseClient:
                 # Category fields (JSONB)
                 json.dumps(category_fields),
                 entity.get("proxycurl_retrieved", False),
-                entity.get("proxycurl_retrieved_at"),
+                self._coerce_dt(entity.get("proxycurl_retrieved_at")),
             )
 
         log.debug(
@@ -553,7 +553,7 @@ class SupabaseClient:
                 evidence.get("source_api"),
                 evidence.get("archived_url"),
                 evidence.get("sha256_hash"),
-                evidence.get("retrieved_at"),
+                self._coerce_dt(evidence.get("retrieved_at")),
                 evidence["evidence_snippet"],
                 evidence.get("claim_type", "direct_statement"),
                 evidence.get("confidence", "medium"),
@@ -606,7 +606,7 @@ class SupabaseClient:
                         evidence.get("source_api"),
                         evidence.get("archived_url"),
                         evidence.get("sha256_hash"),
-                        evidence.get("retrieved_at"),
+                        self._coerce_dt(evidence.get("retrieved_at")),
                         evidence["evidence_snippet"],
                         evidence.get("claim_type", "direct_statement"),
                         evidence.get("confidence", "medium"),
@@ -884,7 +884,7 @@ class SupabaseClient:
                 record.get("response_time_ms"),
                 record.get("served_from_cache", False),
                 record.get("cache_key"),
-                record.get("timestamp"),
+                self._coerce_dt(record.get("timestamp")),
             )
 
         return search_id
@@ -952,9 +952,9 @@ class SupabaseClient:
                 edge.get("relationship_strength"),
                 edge.get("sensitive_claim", False),
                 edge.get("verified", False),
-                edge.get("verified_at"),
-                edge.get("valid_from"),
-                edge.get("valid_to"),
+                self._coerce_dt(edge.get("verified_at")),
+                self._coerce_dt(edge.get("valid_from")),
+                self._coerce_dt(edge.get("valid_to")),
             )
 
         return relationship_id
@@ -1032,7 +1032,7 @@ class SupabaseClient:
                 output_id,
                 output["run_id"],
                 output["agent_name"],
-                output.get("agent_status", "running"),
+                output["agent_status"],
                 output.get("error_message"),
                 output.get("model_used"),
                 output.get("prompt_version"),
@@ -1046,8 +1046,8 @@ class SupabaseClient:
                 output.get("relationships_produced", 0),
                 output.get("items_rejected", 0),
                 output.get("output_snapshot_path"),
-                output.get("started_at"),
-                output.get("completed_at"),
+                self._coerce_dt(output.get("started_at")),
+                self._coerce_dt(output.get("completed_at")),
             )
 
         return output_id
@@ -1100,10 +1100,36 @@ class SupabaseClient:
                 json.dumps(item["item_snapshot"]),
                 item["rejection_reason"],
                 item.get("rejection_detail"),
-                item.get("timestamp"),
+                self._coerce_dt(item.get("timestamp")),
             )
 
         return rejection_id
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Type coercion helpers
+    # ─────────────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _coerce_dt(value: Any) -> datetime | None:
+        """
+        Coerce a timestamp value to a datetime object for asyncpg.
+
+        asyncpg requires datetime objects for TIMESTAMPTZ columns; it rejects
+        ISO 8601 strings. Agents frequently call datetime.now(...).isoformat()
+        for convenience — this method normalizes at the DB boundary.
+
+        Accepts: None, datetime object, ISO 8601 string.
+        Returns: datetime (UTC-aware) or None.
+        """
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return value
+        if isinstance(value, str):
+            return datetime.fromisoformat(value)
+        raise SupabaseClientError(
+            f"_coerce_dt: cannot coerce type {type(value).__name__!r} to datetime"
+        )
 
     # ─────────────────────────────────────────────────────────────────────────
     # Validation helpers

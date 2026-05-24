@@ -46,6 +46,7 @@ from osint.db.neo4j import Neo4jClient
 from osint.db.redis import RedisClient
 from osint.db.supabase import SupabaseClient
 from osint.graph.graph import build_graph
+from osint.llm.ollama import OllamaClient
 from osint.llm.routing import LLMRouter
 from osint.state import initial_state
 
@@ -93,18 +94,23 @@ async def run_osint_pipeline(
     # ── Instantiate infrastructure clients ────────────────────────────────────
     # Each job gets its own client pool. This avoids cross-job connection
     # contamination and makes the worker stateless.
-    db          = SupabaseClient()
-    neo4j       = Neo4jClient()
-    chroma      = ChromaDBClient()
-    redis       = RedisClient()
-    rate_limiter = RateLimiter()
-    llm         = LLMRouter()
+    # NOTE: RateLimiter and LLMRouter are initialized AFTER connecting clients
+    # because they require a live Redis client and a connected OllamaClient.
+    db     = SupabaseClient()
+    neo4j  = Neo4jClient()
+    chroma = ChromaDBClient()
+    redis  = RedisClient()
+    ollama = OllamaClient()
+
+    rate_limiter: RateLimiter | None = None
+    llm: LLMRouter | None = None
 
     try:
         await db.connect()
         await neo4j.connect()
         await chroma.connect()
         await redis.connect()
+        await ollama.connect()
         log.debug("worker: clients connected for run_id=%s", run_id)
 
     except Exception as exc:
@@ -119,8 +125,12 @@ async def run_osint_pipeline(
             )
         except Exception:
             pass  # DB unreachable — can't do anything
-        await _disconnect_all(db, neo4j, chroma, redis)
+        await _disconnect_all(db, neo4j, chroma, redis, ollama)
         return {"run_id": run_id, "run_status": "failed", "error": str(exc)}
+
+    # Dependents require live connections — init after connect
+    rate_limiter = RateLimiter(redis.get_raw_client())
+    llm          = LLMRouter(ollama)
 
     # ── Mark run as running ───────────────────────────────────────────────────
     try:
@@ -199,7 +209,7 @@ async def run_osint_pipeline(
         }
 
     finally:
-        await _disconnect_all(db, neo4j, chroma, redis)
+        await _disconnect_all(db, neo4j, chroma, redis, ollama)
         log.debug("worker: clients disconnected for run_id=%s", run_id)
 
 
@@ -321,9 +331,13 @@ async def _disconnect_all(
     neo4j: Neo4jClient,
     chroma: ChromaDBClient,
     redis: RedisClient,
+    ollama: OllamaClient | None = None,
 ) -> None:
     """Disconnect all clients, ignoring individual disconnect failures."""
-    for client, name in [(db, "db"), (neo4j, "neo4j"), (chroma, "chroma"), (redis, "redis")]:
+    clients = [(db, "db"), (neo4j, "neo4j"), (chroma, "chroma"), (redis, "redis")]
+    if ollama is not None:
+        clients.append((ollama, "ollama"))
+    for client, name in clients:
         try:
             await client.disconnect()
         except Exception as exc:
