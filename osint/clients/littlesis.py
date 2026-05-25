@@ -170,6 +170,7 @@ class LittleSisClient:
             f"{BASE_URL}/entities/search",
             params=params,
             headers=HEADERS,
+            timeout=10.0,  # fail fast if API is down; was 30s default
         )
 
     async def get_entity(self, entity_id: int | str) -> dict[str, Any]:
@@ -191,6 +192,7 @@ class LittleSisClient:
             DOMAIN,
             f"{BASE_URL}/entities/{entity_id}",
             headers=HEADERS,
+            timeout=10.0,
         )
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -257,6 +259,7 @@ class LittleSisClient:
             f"{BASE_URL}/entities/{entity_id}/relationships",
             params=params,
             headers=HEADERS,
+            timeout=10.0,
         )
 
     async def get_all_relationships(

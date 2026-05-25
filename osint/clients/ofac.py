@@ -62,6 +62,7 @@ class OFACClient:
         self._rl    = rate_limiter
         self._redis = rate_limiter._redis if hasattr(rate_limiter, "_redis") else None
         self._sdn_cache: list[dict[str, Any]] | None = None  # in-process cache
+        self._sdn_download_attempted: bool = False  # avoid re-downloading failed fetches
 
     # ─────────────────────────────────────────────────────────────────────────
     # Public API (same interface as before — enrichment_agent uses these)
@@ -141,10 +142,16 @@ class OFACClient:
         Load the SDN list, preferring (in order):
         1. In-process memory cache (same process, same run)
         2. Redis cache (cross-process, TTL = 1 day)
-        3. Live HTTP download from OFAC
+        3. Live HTTP download from OFAC (attempted at most once per process lifetime)
         """
+        # In-process cache hit — includes cached empty list after a failed download
         if self._sdn_cache is not None:
             return self._sdn_cache
+
+        # If we already tried and failed a live download this process lifetime, don't retry.
+        # This prevents 31+ sequential re-downloads when OFAC is unreachable.
+        if self._sdn_download_attempted:
+            return []
 
         # Try Redis cache
         if self._redis is not None:
@@ -158,10 +165,14 @@ class OFACClient:
             except Exception as exc:
                 log.warning("ofac: Redis SDN cache read failed: %s", exc)
 
-        # Live download
+        # Live download — mark as attempted first so failure path is clean
+        self._sdn_download_attempted = True
         entries = await self._download_sdn_list()
+
+        # Always set in-process cache (even if empty) so we don't retry per entity
+        self._sdn_cache = entries
+
         if entries:
-            self._sdn_cache = entries
             # Write to Redis for other workers / future calls
             if self._redis is not None:
                 try:
@@ -169,6 +180,8 @@ class OFACClient:
                     log.info("ofac: cached %d SDN entries in Redis (TTL=%ds)", len(entries), CACHE_TTL)
                 except Exception as exc:
                     log.warning("ofac: failed to write SDN cache to Redis: %s", exc)
+        else:
+            log.warning("ofac: SDN download failed — OFAC checks skipped for remaining entities this run")
 
         return entries
 

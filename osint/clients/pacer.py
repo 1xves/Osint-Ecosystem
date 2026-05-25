@@ -125,7 +125,7 @@ class CourtListenerClient:
                 DOMAIN,
                 f"{BASE_URL}/dockets/",
                 params=params,
-                extra_headers=self._headers(),
+                headers=self._headers(),
             )
         except Exception as exc:
             log.warning("courtlistener: search_cases failed for '%s': %s", party_name, exc)
@@ -167,7 +167,7 @@ class CourtListenerClient:
             response = await self._rl.get(
                 DOMAIN,
                 f"{BASE_URL}/dockets/{docket_id}/",
-                extra_headers=self._headers(),
+                headers=self._headers(),
             )
             return response or {}
         except Exception as exc:
@@ -202,7 +202,7 @@ class CourtListenerClient:
                     "order_by": "-entry_number",
                     "page_size": max_entries,
                 },
-                extra_headers=self._headers(),
+                headers=self._headers(),
             )
         except Exception as exc:
             log.debug("courtlistener: get_docket_entries failed for %s: %s", docket_id, exc)
@@ -282,7 +282,7 @@ class CourtListenerClient:
                     "order_by": "score desc",
                     "page_size": max_results,
                 },
-                extra_headers=self._headers(),
+                headers=self._headers(),
             )
         except Exception as exc:
             log.debug("courtlistener: search_opinions failed for '%s': %s", party_name, exc)

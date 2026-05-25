@@ -368,7 +368,7 @@ class EdgarClient:
             submissions = await self._rl.get(
                 DOMAIN,
                 submissions_url,
-                extra_headers=self._headers(),
+                headers=self._headers(),
             )
         except Exception as exc:
             log.debug("edgar: submissions fetch failed for CIK '%s': %s", cik, exc)

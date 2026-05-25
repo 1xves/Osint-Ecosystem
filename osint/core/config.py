@@ -165,7 +165,7 @@ RATE_LIMITS: dict[str, dict] = {
     },
     "littlesis": {
         "requests_per_minute": 30,          # Conservative — undocumented limit; API is rate-sensitive
-        "retry_backoff_seconds": [2, 5, 15],
+        "retry_backoff_seconds": [3],       # 1 retry only — if API is down, fail fast (was [2,5,15])
         "cache_ttl_seconds": 604800,        # 7 days — power network data is stable
     },
     "followthemoney": {
