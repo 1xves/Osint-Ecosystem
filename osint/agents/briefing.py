@@ -267,6 +267,48 @@ SECTIONS: list[dict[str, str]] = [
         "aux":         "score_investment_potential",
         "description": "Entities with the highest value as investment or grant recipients, or as sources of capital. Include portfolio fit and engagement pathway notes.",
     },
+    # Phase 11.4 additions — Part III continued
+    {
+        "section_id":  "offshore_sanctions_risk",
+        "part":        "III",
+        "title":       "Offshore & Sanctions Risk",
+        "type":        "category",
+        "aux":         "",
+        "description": (
+            "Entities flagged in ICIJ Offshore Leaks (Panama Papers, Paradise Papers, Pandora Papers) "
+            "or on OFAC / UN / EU / BIS sanctions lists. For each flagged entity, state the dataset, "
+            "offshore jurisdiction or sanctions program, and known officer or beneficial owner linkages. "
+            "All findings are from leaked documents — presence does NOT constitute proof of wrongdoing. "
+            "Treat as indicators requiring further due diligence. If no entities are flagged, state that explicitly."
+        ),
+    },
+    {
+        "section_id":  "litigation_history",
+        "part":        "III",
+        "title":       "Litigation History",
+        "type":        "category",
+        "aux":         "",
+        "description": (
+            "Active and historical legal proceedings involving ecosystem entities, drawn from CourtListener / PACER data. "
+            "Include case names, courts, filing dates, case types (civil, criminal, bankruptcy), and current status where known. "
+            "Focus on cases that represent material risk to partners, investors, or market entrants. "
+            "If no litigation records exist in the dataset, state that explicitly."
+        ),
+    },
+    {
+        "section_id":  "capital_network",
+        "part":        "III",
+        "title":       "Capital Network",
+        "type":        "network",
+        "aux":         "",
+        "description": (
+            "Map the flow of capital through the ecosystem: who funds whom, who receives grants, "
+            "who holds real estate portfolios (HUD data), and which investors are co-invested across portfolio companies. "
+            "Identify the most connected capital nodes — entities that sit at the intersection of multiple funding flows. "
+            "Draw on HUD property portfolios, EDGAR ownership filings, Form D SEC disclosures, "
+            "and investor co-investment relationships where available."
+        ),
+    },
     # Part IV: Quality & Confidence
     {
         "section_id":  "coverage_gaps",
@@ -286,7 +328,7 @@ SECTIONS: list[dict[str, str]] = [
     },
 ]
 
-assert len(SECTIONS) == 20, f"Expected 20 sections, got {len(SECTIONS)}"
+assert len(SECTIONS) == 23, f"Expected 23 sections, got {len(SECTIONS)}"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Prompts
@@ -362,8 +404,8 @@ class BriefingAgent(BaseAgent):
         framings: list[dict[str, Any]]             = state.get("framings", [])
 
         log.info(
-            "briefing_agent: drafting 20-section brief for %s — %d verified entities",
-            city_name, len(verified_entity_ids),
+            "briefing_agent: drafting %d-section brief for %s — %d verified entities",
+            len(SECTIONS), city_name, len(verified_entity_ids),
         )
 
         # ── Pre-build indices ─────────────────────────────────────────────────
@@ -448,6 +490,9 @@ class BriefingAgent(BaseAgent):
         # Statistics block
         statistics = _build_statistics(verified_entities, relationships, verification_summary, gap_analysis)
 
+        # Phase 11.4 — Source attribution table
+        source_attribution = _build_source_attribution(verified_entities, relationships)
+
         briefing_json: dict[str, Any] = {
             "run_id":          run_id,
             "city_name":       city_name,
@@ -457,6 +502,7 @@ class BriefingAgent(BaseAgent):
             "relationship_count": len(relationships),
             "statistics":      statistics,
             "sections":        sections_json,
+            "source_attribution": source_attribution,
         }
 
         # ── Generate markdown ─────────────────────────────────────────────────
@@ -720,7 +766,7 @@ class BriefingAgent(BaseAgent):
             "relationships_total": len(relationships),
             "claims_verified":     verification_summary.get("passed", 0),
             "claims_failed":       verification_summary.get("failed", 0),
-            "items_rejected":      state.get("agent_entity_counts", {}).get("resolution_agent", 0),
+            "items_rejected":      len(state.get("ambiguous_merges", [])) + len(state.get("relationships_rejected", [])),
             "overall_confidence":  _compute_overall_confidence(verified_entities),
             "pass_count":          state.get("pass_number", 1),
             "gap_fill_triggered":  bool(thin_categories),
@@ -1068,6 +1114,77 @@ def _compute_overall_confidence(entities: list[dict[str, Any]]) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Phase 11.4 — Source attribution
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Which category_fields keys signal that a particular data source contributed data.
+# Maps category_fields key → (domain, human label, quality tier)
+_SOURCE_SIGNALS: list[tuple[str, str, str, str]] = [
+    # (category_fields_key_prefix, domain, label, quality)
+    ("ofac_matches",            "ofac",            "OFAC SDN List",                  "primary"),
+    ("icij_nodes",              "icij_leaks",       "ICIJ Offshore Leaks",            "secondary"),
+    ("icij_shell_chain",        "icij_leaks",       "ICIJ Offshore Leaks",            "secondary"),
+    ("un_sanctions",            "un_sanctions",     "UN Security Council Sanctions",  "primary"),
+    ("eu_sanctions",            "eu_sanctions",     "EU Consolidated Sanctions",      "primary"),
+    ("bis_denied",              "bis_denied",       "BIS Denied Persons List",        "primary"),
+    ("linkedin_url",            "proxycurl",        "Proxycurl / LinkedIn",           "primary"),
+    ("littlesis_id",            "littlesis",        "LittleSis",                      "secondary"),
+    ("litigation_cases",        "courtlistener",    "CourtListener / PACER",          "secondary"),
+    ("edgar_proxy_data",        "edgar",            "SEC EDGAR",                      "primary"),
+    ("edgar_10k_data",          "edgar",            "SEC EDGAR",                      "primary"),
+    ("hud_properties",          "hud",              "HUD Multifamily Housing",        "primary"),
+    ("fincen_ctr_summary",      "fincen",           "FinCEN Currency Transaction Reports", "primary"),
+    ("opencorporates_data",     "opencorporates",   "OpenCorporates",                 "secondary"),
+    ("bizapedia_officers",      "bizapedia",        "Bizapedia",                      "secondary"),
+    ("patent_count",            "patentview",       "PatentView / USPTO",             "secondary"),
+    ("ftm_contributions",       "followthemoney",   "Follow the Money",               "secondary"),
+    ("wayback_pages",           "wayback",          "Wayback Machine",                "tertiary"),
+    ("gdelt_articles",          "gdelt",            "GDELT Project",                  "tertiary"),
+]
+
+
+def _build_source_attribution(
+    entities: list[dict[str, Any]],
+    relationships: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """
+    Build a source attribution map from entity category_fields and relationship edges.
+
+    Returns:
+        dict keyed by domain: {label, quality, records_used}
+    """
+    # domain → {label, quality, records_used (count of entities/edges that used this source)}
+    attr: dict[str, dict[str, Any]] = {}
+
+    def _register(domain: str, label: str, quality: str, count: int = 1) -> None:
+        if domain not in attr:
+            attr[domain] = {"label": label, "quality": quality, "records_used": 0}
+        attr[domain]["records_used"] += count
+
+    for entity in entities:
+        cat = entity.get("category_fields") or {}
+        for key_prefix, domain, label, quality in _SOURCE_SIGNALS:
+            val = cat.get(key_prefix)
+            if val:  # any truthy value — list, dict, string, int
+                # For list-type values, count individual records; otherwise count as 1
+                count = len(val) if isinstance(val, list) else 1
+                _register(domain, label, quality, count)
+
+    # Relationship sources (deduplicate by relationship_id, count per domain)
+    for edge in relationships:
+        src = edge.get("_source_quality") or edge.get("source_quality", "")
+        if not src:
+            continue
+        # Map source_quality tier back to a generic "pipeline_inference" if no domain known
+        # (LLM-inferred edges don't have a domain; WORKS_UNDER is internal)
+        rel_type = edge.get("relationship_type", "")
+        if edge.get("is_inferred") or rel_type == "WORKS_UNDER":
+            _register("pipeline_inference", "Pipeline Inference (2-hop)", "tertiary")
+
+    return attr
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Markdown renderer
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1148,9 +1265,28 @@ def _render_markdown(briefing: dict[str, Any]) -> str:
 
     lines.append("---")
     lines.append("")
+
+    # ── Phase 11.4: Source Attribution Table ──────────────────────────────────
+    source_map = briefing.get("source_attribution", {})
+    if source_map:
+        lines.append("## Data Sources")
+        lines.append("")
+        lines.append("| Source | Domain | Quality | Records Used |")
+        lines.append("|--------|--------|---------|--------------|")
+        for domain, attrs in sorted(source_map.items()):
+            label   = attrs.get("label", domain)
+            quality = attrs.get("quality", "tertiary")
+            count   = attrs.get("records_used", 0)
+            lines.append(f"| {label} | `{domain}` | {quality} | {count} |")
+        lines.append("")
+
+    lines.append("---")
+    lines.append("")
     lines.append(
         f"*This brief was generated automatically by the OSINT Intelligence Pipeline. "
-        f"All findings should be verified against primary sources before acting on them.*"
+        f"All findings should be verified against primary sources before acting on them. "
+        f"ICIJ Offshore Leaks data reflects leaked documents only — inclusion does not "
+        f"constitute proof of wrongdoing.*"
     )
 
     return "\n".join(lines)

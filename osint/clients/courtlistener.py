@@ -44,7 +44,7 @@ class CourtListenerClient:
     async def search_cases(
         self,
         query: str,
-        case_type: str | None = None,    # "opinion" | "recap" | "oral_argument"
+        case_type: str | None = None,    # "o" (opinions) | "r" (RECAP/federal docs) | "oa" (oral arguments)
         court: str | None = None,         # e.g., "scotus", "ca9"
         filed_after: str | None = None,   # YYYY-MM-DD
         filed_before: str | None = None,
@@ -107,4 +107,4 @@ class CourtListenerClient:
         query = f'"{entity_name}" fraud OR "securities violation" OR "wire fraud" OR "money laundering"'
         if city:
             query += f" {city}"
-        return await self.search_cases(query=query, case_type="recap", page_size=10)
+        return await self.search_cases(query=query, case_type="r", page_size=10)

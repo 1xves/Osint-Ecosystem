@@ -421,6 +421,41 @@ class SupabaseClient:
                 classification_flags.get("top_influencer", False),
             )
 
+    async def update_entity_category_fields(
+        self,
+        entity_id: str,
+        category_fields: dict,
+    ) -> None:
+        """
+        Persist enriched category_fields JSONB back to the current entity record.
+
+        Called by the Scoring Agent after enrichment is complete. category_fields
+        is populated during the enrichment phase (HUD properties, FinCEN CTR,
+        CourtListener cases, EDGAR compensation, etc.) but write_entity() is only
+        called at entity creation time (resolution.py) and for OFAC temporal
+        versioning. This method closes that gap for all non-OFAC entities.
+
+        Not a temporal versioning event — category_fields are derived enrichment
+        data, not new source identity data. UPDATE in-place on the current record.
+
+        Args:
+            entity_id:        The entity UUID to update.
+            category_fields:  Dict of enrichment data keyed by source name.
+        """
+        if not category_fields:
+            return
+        pool = self._pool_required()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE entities
+                SET category_fields = $2::jsonb
+                WHERE entity_id = $1::uuid AND valid_to IS NULL
+                """,
+                entity_id,
+                json.dumps(category_fields),
+            )
+
     async def flag_entities_for_review(self, entity_ids: list[str]) -> None:
         """
         Set needs_review = true for a list of entities via a single targeted UPDATE.
@@ -679,6 +714,82 @@ class SupabaseClient:
     # Read methods — API layer queries
     # ─────────────────────────────────────────────────────────────────────────
 
+    async def list_runs(
+        self,
+        city_key: str | None = None,
+        status: str | None = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """
+        Paginated list of agent_runs, newest first.
+
+        Args:
+            city_key: Normalized city identifier e.g. "philadelphia_us"
+            status:   Filter by run_status: pending|running|complete|partial|failed
+            limit:    Max records (capped at 100)
+            offset:   Pagination offset
+        """
+        pool = self._pool_required()
+        limit = min(limit, 100)
+
+        conditions: list[str] = []
+        params: list[Any] = []
+        idx = 1
+
+        if city_key:
+            conditions.append(f"city_key = ${idx}")
+            params.append(city_key)
+            idx += 1
+
+        if status:
+            conditions.append(f"run_status = ${idx}")
+            params.append(status)
+            idx += 1
+
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        params.extend([limit, offset])
+
+        query = f"""
+            SELECT run_id, city_name, country_or_region, city_key,
+                   run_status, started_at, completed_at,
+                   total_entities_found, total_relationships_found,
+                   overall_confidence, failure_reason
+            FROM agent_runs
+            {where}
+            ORDER BY started_at DESC NULLS LAST
+            LIMIT ${idx} OFFSET ${idx + 1}
+        """
+
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(query, *params)
+            return [dict(r) for r in rows]
+
+    async def count_runs(
+        self,
+        city_key: str | None = None,
+        status: str | None = None,
+    ) -> int:
+        """Count runs matching optional filters."""
+        pool = self._pool_required()
+        conditions: list[str] = []
+        params: list[Any] = []
+        idx = 1
+
+        if city_key:
+            conditions.append(f"city_key = ${idx}")
+            params.append(city_key)
+            idx += 1
+        if status:
+            conditions.append(f"run_status = ${idx}")
+            params.append(status)
+            idx += 1
+
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(f"SELECT COUNT(*) AS n FROM agent_runs {where}", *params)
+            return row["n"] if row else 0
+
     async def get_run(self, run_id: str) -> dict[str, Any] | None:
         """
         Fetch a single agent_runs record by run_id.
@@ -930,7 +1041,7 @@ class SupabaseClient:
                     source_entity_id, target_entity_id,
                     relationship_type, direction,
                     evidence_ids, evidence_snippets,
-                    confidence, relationship_strength,
+                    confidence, confidence_score, relationship_strength,
                     sensitive_claim, verified, verified_at,
                     valid_from, valid_to,
                     neo4j_synced
@@ -939,9 +1050,9 @@ class SupabaseClient:
                     $3::uuid, $4::uuid,
                     $5, $6,
                     $7::uuid[], $8,
-                    $9, $10,
-                    $11, $12, $13,
-                    $14::date, $15::date,
+                    $9, $10, $11,
+                    $12, $13, $14,
+                    $15::date, $16::date,
                     FALSE
                 )
                 ON CONFLICT (source_entity_id, target_entity_id, relationship_type, run_id)
@@ -956,6 +1067,7 @@ class SupabaseClient:
                 edge["evidence_ids"],
                 edge.get("evidence_snippets", []),
                 edge.get("confidence", "medium"),
+                edge.get("confidence_score"),           # Phase 11.2 — float (may be NULL for old rows)
                 edge.get("relationship_strength"),
                 edge.get("sensitive_claim", False),
                 edge.get("verified", False),

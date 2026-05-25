@@ -30,19 +30,18 @@ services:
 
   # ─── ChromaDB — Vector Database (Entity Resolution) ────────────────────────
   chromadb:
-    image: chromadb/chroma:0.5.3
+    image: chromadb/chroma:1.0.0
     container_name: osint_chromadb
     restart: unless-stopped
     ports:
-      - "8001:8000"   # ChromaDB HTTP API
+      - "8001:8000"   # ChromaDB HTTP API (client SDK 1.x requires /api/v2/)
     environment:
-      CHROMA_SERVER_AUTH_CREDENTIALS_PROVIDER: ""
       ANONYMIZED_TELEMETRY: "false"
       ALLOW_RESET: "true"
     volumes:
       - chromadb_data:/chroma/chroma
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/heartbeat"]
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v2/heartbeat"]
       interval: 30s
       timeout: 10s
       retries: 5

@@ -325,7 +325,122 @@ class NonprofitAgent(BaseAgent):
                 }
                 entities.append(entity)
 
+        # ── Pass 2: fetch 990 detail for each entity with an EIN ──────────────
+        # get_nonprofit(ein) returns organization detail including city, website,
+        # and multi-year revenue history not available in the search results.
+        # This is critical: search results have name/EIN but minimal metadata.
+        # Without the detail call, nonprofit entities have nearly empty profiles,
+        # which means description_status=NOT_COLLECTED for all of them, blocking
+        # LLM relationship inference in the relationship agent.
+        #
+        # Limit to first 15 to keep run time reasonable (each is an API call).
+        await self._enrich_from_990_detail(entities[:15], run_id)
+
         return entities
+
+    async def _enrich_from_990_detail(
+        self,
+        entities: list[dict[str, Any]],
+        run_id: str,
+    ) -> None:
+        """
+        Fetch ProPublica 990 detail for each entity that has an EIN.
+        Mutates entities in-place — adds city, state, website, description,
+        executive officers list, and precise revenue from the filing.
+
+        The ProPublica organization detail endpoint returns:
+          organization.city, organization.state, organization.website
+          filings_with_data[0] — most recent filing with revenue figures
+          filings_with_data[0].comp_info — executive compensation (if present)
+
+        Officer names from Part VII of the 990 are not in the ProPublica API
+        response directly — they require the IRS 990 XML from S3. We store
+        `_needs_990_xml=True` on the entity so that future enrichment passes
+        can fetch the full document. For now we capture what's available from
+        ProPublica alone.
+        """
+        import asyncio as _asyncio
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+        for entity in entities:
+            cat = entity.get("category_fields", {})
+            ein = cat.get("ein")
+            if not ein:
+                continue
+
+            t_start = time.monotonic()
+            try:
+                detail = await self._propublica.get_nonprofit(str(ein))
+            except Exception as e:
+                log.debug("NonprofitAgent: 990 detail fetch failed for EIN %s: %s", ein, e)
+                continue
+
+            elapsed_ms = int((time.monotonic() - t_start) * 1000)
+            org = detail.get("organization", {})
+            filings = detail.get("filings_with_data", [])
+
+            if not org and not filings:
+                continue
+
+            await self.write_search_record(
+                source_searched="propublica_nonprofits",
+                query_used=f"990 detail EIN:{ein}",
+                result_found=bool(org),
+                entity_type="nonprofit",
+                result_count=len(filings),
+                response_time_ms=elapsed_ms,
+            )
+
+            # ── Populate missing city/state from 990 filing ────────────────
+            if org.get("city") and not entity.get("primary_city"):
+                entity["primary_city"]        = org["city"].title()
+                entity["primary_city_status"] = "REPORTED"
+            if org.get("state") and not entity.get("primary_state"):
+                entity["primary_state"]        = org["state"]
+                entity["primary_state_status"] = "REPORTED"
+
+            # ── Populate website ────────────────────────────────────────────
+            website = org.get("website")
+            if website and not entity.get("website_url"):
+                entity["website_url"]        = website
+                entity["website_url_status"] = "REPORTED"
+
+            # ── Populate description from mission statement ─────────────────
+            mission = org.get("mission_statement") or org.get("motto")
+            if mission and not entity.get("description"):
+                entity["description"]        = mission[:500]
+                entity["description_status"] = "REPORTED"
+
+            # ── Revenue from most recent filing ─────────────────────────────
+            if filings:
+                most_recent = filings[0]
+                total_revenue = most_recent.get("totrevenue")
+                total_assets  = most_recent.get("totassetsend")
+                tax_year      = most_recent.get("tax_prd_yr")
+
+                if total_revenue is not None:
+                    cat["total_revenue"]        = total_revenue
+                    cat["total_revenue_status"] = "REPORTED"
+                    cat["revenue_year"]         = str(tax_year) if tax_year else None
+                if total_assets is not None:
+                    cat["total_assets"]         = total_assets
+                    cat["total_assets_status"]  = "REPORTED"
+
+                # ── Executive compensation data (if available) ─────────────
+                comp_info = most_recent.get("comp_info") or most_recent.get("officers", [])
+                if isinstance(comp_info, list) and comp_info:
+                    officer_names = []
+                    for officer in comp_info[:10]:
+                        name_raw = officer.get("name") or officer.get("nm") or ""
+                        if name_raw:
+                            officer_names.append(name_raw.strip())
+                    if officer_names:
+                        cat["board_member_names"]        = officer_names
+                        cat["board_member_names_status"] = "REPORTED"
+
+            # Flag for future 990 XML enrichment (Part VII officer table)
+            cat["_needs_990_xml"] = True
+            cat["_990_detail_fetched"] = True
 
     def _infer_nonprofit_subtype(self, name_lower: str, ntee_code: str) -> str:
         """Infer nonprofit subtype from name keywords and NTEE code."""

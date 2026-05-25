@@ -44,6 +44,7 @@ from typing import Any
 from osint.agents.base import BaseAgent
 from osint.clients.crunchbase import CrunchbaseClient
 from osint.clients.edgar import EdgarClient
+from osint.clients.form_d import FormDClient
 from osint.clients.opencorporates import OpenCorporatesClient
 from osint.clients.serpapi import SerpApiClient
 from osint.core.config import settings
@@ -104,6 +105,7 @@ class CorporateAgent(BaseAgent):
         super().__init__(*args, **kwargs)
         self._crunchbase = CrunchbaseClient(self._rl)
         self._edgar = EdgarClient(self._rl)
+        self._form_d = FormDClient(self._rl)
         self._opencorporates = OpenCorporatesClient(self._rl)
         self._serpapi = SerpApiClient(self._rl)
 
@@ -133,17 +135,28 @@ class CorporateAgent(BaseAgent):
         new_raw_entities.extend(cb_entities)
         log.info("CorporateAgent: Crunchbase yielded %d raw entities", len(cb_entities))
 
-        # ── Source 2: EDGAR (public company 10-K filers) ──────────────────────
+        # ── Source 2: SEC Form D (private company officers + new raises) ────────
+        # Form D is the primary replacement for Crunchbase for private companies.
+        # Every Reg D capital raise requires an SEC filing listing executive officers
+        # and directors. Produces both corporate entities and officer stub entities.
+        state_abbr = state.get("state_abbr") or "PA"  # fallback PA; initial_state() auto-detects
+        form_d_entities = await self._collect_from_form_d(
+            city_name, state_abbr, run_id
+        )
+        new_raw_entities.extend(form_d_entities)
+        log.info("CorporateAgent: Form D yielded %d raw entities", len(form_d_entities))
+
+        # ── Source 3: EDGAR (public company 10-K filers) ──────────────────────
         edgar_entities = await self._collect_from_edgar(city_name, run_id)
         new_raw_entities.extend(edgar_entities)
         log.info("CorporateAgent: EDGAR yielded %d raw entities", len(edgar_entities))
 
-        # ── Source 3: OpenCorporates (state registry) ─────────────────────────
+        # ── Source 4: OpenCorporates (state registry) ─────────────────────────
         oc_entities = await self._collect_from_opencorporates(city_name, run_id)
         new_raw_entities.extend(oc_entities)
         log.info("CorporateAgent: OpenCorporates yielded %d raw entities", len(oc_entities))
 
-        # ── Source 4: SerpAPI ─────────────────────────────────────────────────
+        # ── Source 5: SerpAPI ─────────────────────────────────────────────────
         serp_entities = await self._collect_from_serpapi(
             city_name, country_or_region, run_id, targeted_queries=targeted_queries
         )
@@ -363,6 +376,335 @@ class CorporateAgent(BaseAgent):
         return "private_company"
 
     # ─────────────────────────────────────────────────────────────────────────
+    # SEC Form D — private company officers and new raises
+    # ─────────────────────────────────────────────────────────────────────────
+
+    async def _collect_from_form_d(
+        self,
+        city_name: str,
+        state_abbr: str,
+        run_id: str,
+    ) -> list[dict[str, Any]]:
+        """
+        Collect private company entities from SEC Form D filings.
+
+        Form D is filed for every Reg D capital raise. The "Related Persons"
+        section lists executive officers and directors. This method produces:
+          (a) Corporate entity records — the issuing company
+          (b) Executive stub entities — named officers/directors as person stubs
+
+        Stubs have entity_type="executive_hnw" and overall_confidence="low".
+        The enrichment agent will attempt to enrich them; the resolution agent
+        will merge duplicates. The relationship agent will create employment/
+        board_membership edges linking stubs back to the corporate entity.
+
+        Args:
+            city_name:   City to search (used as EFTS query term).
+            state_abbr:  Two-letter state abbreviation (e.g., "PA").
+            run_id:      Pipeline run ID for evidence provenance.
+
+        Returns:
+            Combined list of corporate + executive_hnw entity dicts.
+        """
+        search_start = time.monotonic()
+        try:
+            filings = await self._form_d.get_city_companies_and_officers(
+                city_name=city_name,
+                state_abbr=state_abbr,
+                lookback_days=730,    # 2 years of Reg D activity
+                max_filings=40,
+                max_xml_fetches=30,
+            )
+        except Exception as e:
+            log.warning("CorporateAgent: Form D collection failed: %s", e)
+            await self.write_search_record(
+                source_searched="sec_form_d",
+                query_used=f"Form D filings for {city_name} {state_abbr}",
+                result_found=False,
+                entity_type="corporate",
+                failure_reason=str(e),
+                response_time_ms=int((time.monotonic() - search_start) * 1000),
+            )
+            return []
+
+        elapsed_ms = int((time.monotonic() - search_start) * 1000)
+
+        if not filings:
+            await self.write_search_record(
+                source_searched="sec_form_d",
+                query_used=f"Form D filings for {city_name} {state_abbr}",
+                result_found=False,
+                entity_type="corporate",
+                result_count=0,
+                response_time_ms=elapsed_ms,
+            )
+            return []
+
+        await self.write_search_record(
+            source_searched="sec_form_d",
+            query_used=f"Form D filings for {city_name} {state_abbr}",
+            result_found=True,
+            entity_type="corporate",
+            result_count=len(filings),
+            response_time_ms=elapsed_ms,
+        )
+
+        entities: list[dict[str, Any]] = []
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+        for filing in filings:
+            company_data = filing.get("company")
+            persons_data = filing.get("persons", [])
+            metadata     = filing.get("metadata", {})
+
+            # ── Corporate entity from Form D issuer ───────────────────────
+            if company_data and company_data.get("canonical_name"):
+                name        = company_data["canonical_name"]
+                issuer_city  = (company_data.get("issuer_city") or city_name).title()
+                issuer_state = company_data.get("issuer_state") or state_abbr
+                source_url  = company_data.get("source_url") or ""
+                cik         = company_data.get("sec_cik") or ""
+                accession   = company_data.get("form_d_accession") or ""
+
+                category_fields: dict[str, Any] = {
+                    "corporate_subtype":        "private_company",
+                    "corporate_subtype_status": "REPORTED",
+                    "sec_cik":                  cik,
+                    "sec_cik_status":           "REPORTED" if cik else "NOT_COLLECTED",
+                    "form_d_accession":         accession,
+                    "offering_type":            company_data.get("offering_type"),
+                    "offering_type_status":     "REPORTED" if company_data.get("offering_type") else "NOT_COLLECTED",
+                    "total_funding":            company_data.get("total_offering_amount"),
+                    "total_funding_status":     "REPORTED" if company_data.get("total_offering_amount") else "NOT_COLLECTED",
+                    "founded_year":             company_data.get("year_of_inc"),
+                    "founded_year_status":      "REPORTED" if company_data.get("year_of_inc") else "NOT_COLLECTED",
+                    # Related persons will link back via relationship agent
+                    "form_d_officers":          [p["full_name"] for p in persons_data if p.get("full_name")],
+                    "form_d_officers_status":   "REPORTED" if persons_data else "NOT_REPORTED",
+                }
+
+                corp_entity: dict[str, Any] = {
+                    "entity_id": None,
+                    "canonical_name": name,
+                    "entity_type": "corporate",
+                    "entity_subtype": "private_company",
+                    "aliases": [],
+                    "valid_from": now_iso,
+                    "valid_to": None,
+                    "superseded_by": None,
+
+                    "primary_city": issuer_city,
+                    "primary_city_status": "REPORTED",
+                    "primary_state": issuer_state,
+                    "primary_state_status": "REPORTED" if issuer_state else "NOT_COLLECTED",
+                    "primary_country": "United States",
+                    "primary_country_status": "REPORTED",
+
+                    "website_url": None,
+                    "website_url_status": "NOT_COLLECTED",
+                    "linkedin_url": None,
+                    "linkedin_url_status": "NOT_COLLECTED",
+                    "twitter_handle": None,
+                    "twitter_handle_status": "NOT_COLLECTED",
+
+                    "description": None,
+                    "description_status": "NOT_COLLECTED",
+                    "description_source_url": source_url,
+
+                    "external_ids": {"sec_cik": cik} if cik else {},
+                    "source_agent": self.AGENT_NAME,
+                    "source_run_ids": [run_id],
+                    "merge_provenance": [],
+                    "source_urls": [source_url] if source_url else [],
+                    "last_seen": now_iso,
+                    "last_verified": None,
+
+                    "overall_confidence": "high",   # Regulatory filing = high confidence
+                    "source_count": 1,
+                    "corroboration_count": 0,
+
+                    "partner_candidate": False,
+                    "competitor_candidate": False,
+                    "blocker_candidate": False,
+                    "investment_candidate": True,   # Actively raising capital
+                    "support_candidate": False,
+                    "recruiter_candidate": False,
+                    "top_influencer": False,
+
+                    "score_influence": 0,
+                    "score_startup_relevance": 0,
+                    "score_partner_potential": 0,
+                    "score_supporter_potential": 0,
+                    "score_competitor_potential": 0,
+                    "score_blocker_risk": 0,
+                    "score_investment_potential": 0,
+                    "score_support_target": 0,
+                    "score_recruiting_potential": 0,
+
+                    "needs_review": False,
+                    "sensitivity_tier": "standard",
+
+                    "category_fields": category_fields,
+
+                    "_raw_entity_id": str(uuid.uuid4()),
+                    "_source": "sec_form_d",
+                    "_pending_evidence": [
+                        {
+                            "entity_id": None,
+                            "run_id": run_id,
+                            "supported_field": "canonical_name",
+                            "supported_value": name,
+                            "source_url": source_url,
+                            "source_type": "regulatory_filing",
+                            "source_api": "sec_edgar",
+                            "retrieved_at": now_iso,
+                            "evidence_snippet": (
+                                f"SEC Form D: {name} filed a Reg D offering disclosure "
+                                f"(accession: {accession}) indicating a private company "
+                                f"headquartered in {issuer_city}, {issuer_state}"
+                            ),
+                            "claim_type": "direct_statement",
+                            "confidence": "high",
+                            "agent_name": self.AGENT_NAME,
+                            "prompt_version": self.AGENT_VERSION,
+                        }
+                    ],
+                }
+                entities.append(corp_entity)
+
+                # ── Executive stub entities from Related Persons ───────────
+                # Create minimal stubs for each named officer/director.
+                # These carry the relationship back to the corporate entity via
+                # _form_d_employer_name field, which relationship_agent reads
+                # to generate board_membership / employment edges.
+                for person in persons_data:
+                    full_name = person.get("full_name", "").strip()
+                    if not full_name:
+                        continue
+
+                    roles = person.get("roles", [])
+                    roles_str = ", ".join(roles) if roles else "Related Person"
+                    clarification = person.get("clarification")
+
+                    # Map Form D roles to the standard category_fields keys that
+                    # relationship_agent reads:
+                    #   current_employer  → _extract_employed_by()  → EMPLOYED_BY edge
+                    #   board_seats       → _extract_sits_on_board_of() → SITS_ON_BOARD_OF edge
+                    person_category_fields: dict[str, Any] = {
+                        # Standard relationship_agent keys — DO NOT rename
+                        "current_employer":         name if person.get("is_executive") else None,
+                        "current_employer_status":  "REPORTED" if person.get("is_executive") else "NOT_COLLECTED",
+                        "board_seats":              [name] if person.get("is_director") else [],
+                        "board_seats_status":       "REPORTED" if person.get("is_director") else "NOT_COLLECTED",
+                        "primary_role":             ", ".join(roles) if roles else "Related Person",
+                        "primary_role_status":      "REPORTED",
+                        # Provenance — internal metadata
+                        "_form_d_employer_name":    name,
+                        "_form_d_employer_cik":     cik,
+                        "_form_d_roles":            roles,
+                        "_form_d_clarification":    clarification,
+                        "is_executive":             person.get("is_executive", False),
+                        "is_executive_status":      "REPORTED",
+                        "is_director":              person.get("is_director", False),
+                        "is_director_status":       "REPORTED",
+                    }
+
+                    stub_entity: dict[str, Any] = {
+                        "entity_id": None,
+                        "canonical_name": full_name,
+                        "entity_type": "executive_hnw",
+                        "entity_subtype": "executive" if person.get("is_executive") else "director",
+                        "aliases": [],
+                        "valid_from": now_iso,
+                        "valid_to": None,
+                        "superseded_by": None,
+
+                        "primary_city": issuer_city,
+                        "primary_city_status": "NOT_COLLECTED",
+                        "primary_state": issuer_state,
+                        "primary_state_status": "NOT_COLLECTED",
+                        "primary_country": "United States",
+                        "primary_country_status": "NOT_COLLECTED",
+
+                        "website_url": None,
+                        "website_url_status": "NOT_COLLECTED",
+                        "linkedin_url": None,
+                        "linkedin_url_status": "NOT_COLLECTED",
+                        "twitter_handle": None,
+                        "twitter_handle_status": "NOT_COLLECTED",
+
+                        "description": None,
+                        "description_status": "NOT_COLLECTED",
+                        "description_source_url": source_url,
+
+                        "external_ids": {},
+                        "source_agent": self.AGENT_NAME,
+                        "source_run_ids": [run_id],
+                        "merge_provenance": [],
+                        "source_urls": [source_url] if source_url else [],
+                        "last_seen": now_iso,
+                        "last_verified": None,
+
+                        "overall_confidence": "medium",
+                        "source_count": 1,
+                        "corroboration_count": 0,
+
+                        "partner_candidate": False,
+                        "competitor_candidate": False,
+                        "blocker_candidate": False,
+                        "investment_candidate": False,
+                        "support_candidate": False,
+                        "recruiter_candidate": False,
+                        "top_influencer": False,
+
+                        "score_influence": 0,
+                        "score_startup_relevance": 0,
+                        "score_partner_potential": 0,
+                        "score_supporter_potential": 0,
+                        "score_competitor_potential": 0,
+                        "score_blocker_risk": 0,
+                        "score_investment_potential": 0,
+                        "score_support_target": 0,
+                        "score_recruiting_potential": 0,
+
+                        "needs_review": False,
+                        "sensitivity_tier": "standard",
+
+                        "category_fields": person_category_fields,
+
+                        "_raw_entity_id": str(uuid.uuid4()),
+                        "_source": "sec_form_d",
+                        "_pending_evidence": [
+                            {
+                                "entity_id": None,
+                                "run_id": run_id,
+                                "supported_field": "canonical_name",
+                                "supported_value": full_name,
+                                "source_url": source_url,
+                                "source_type": "regulatory_filing",
+                                "source_api": "sec_edgar",
+                                "retrieved_at": now_iso,
+                                "evidence_snippet": (
+                                    f"SEC Form D ({accession}): {full_name} listed as "
+                                    f"{roles_str} of {name}"
+                                    + (f" — {clarification}" if clarification else "")
+                                ),
+                                "claim_type": "direct_statement",
+                                "confidence": "high",
+                                "agent_name": self.AGENT_NAME,
+                                "prompt_version": self.AGENT_VERSION,
+                            }
+                        ],
+                    }
+                    entities.append(stub_entity)
+
+        log.info(
+            "CorporateAgent: Form D produced %d entities (%d from %d filings)",
+            len(entities), len(filings), len([f for f in filings if f.get("company")]),
+        )
+        return entities
+
+    # ─────────────────────────────────────────────────────────────────────────
     # EDGAR — public company 10-K filers
     # ─────────────────────────────────────────────────────────────────────────
 
@@ -375,17 +717,28 @@ class CorporateAgent(BaseAgent):
         Search EDGAR for publicly-traded companies filing 10-K annual reports.
         These are the highest-profile corporate entities.
         """
+        # EDGAR full-text search does not support geographic filtering directly.
+        # Searching with city_name as BOTH name and city produces a nonsensical
+        # query like '"Philadelphia" "Philadelphia"' that finds documents mentioning
+        # the word, not companies headquartered there.
+        #
+        # Correct approach: search for 10-K filings using a disambiguating query
+        # that targets companies headquartered in the city. Use "10-K" form filter
+        # with the city name as a bare quoted term — this finds annual reports from
+        # companies that mention the city in their business description or address.
+        # EDGAR EFTS indexes the full text of 10-K filings.
         search_start = time.monotonic()
         try:
-            response = await self._edgar.search_company_name(
-                name=city_name,
-                city=city_name,
+            response = await self._edgar.search(
+                query=f'"{city_name}"',
+                forms=["10-K"],
+                hits_size=20,
             )
         except Exception as e:
             log.warning("CorporateAgent: EDGAR search failed: %s", e)
             await self.write_search_record(
                 source_searched="sec_edgar",
-                query_used=f"10-K annual reports {city_name}",
+                query_used=f"EDGAR 10-K filers mentioning {city_name}",
                 result_found=False,
                 entity_type="corporate",
                 failure_reason=str(e),
@@ -398,7 +751,7 @@ class CorporateAgent(BaseAgent):
 
         await self.write_search_record(
             source_searched="sec_edgar",
-            query_used=f"10-K annual report filers in {city_name}",
+            query_used=f'EDGAR 10-K full-text search: "{city_name}"',
             result_found=bool(hits),
             entity_type="corporate",
             result_count=len(hits),

@@ -269,6 +269,16 @@ class ChromaDBClient:
         collection = self._collection_required()
         return await collection.count()
 
+    async def disconnect(self) -> None:
+        """
+        Release resources. ChromaDB's AsyncHttpClient holds no persistent connection
+        (each request creates its own HTTP session), so this is a no-op. Present so
+        the worker's _disconnect_all() helper can call client.disconnect() uniformly
+        across all DB clients without special-casing ChromaDB.
+        """
+        self._client = None
+        self._collection = None
+
     # ─────────────────────────────────────────────────────────────────────────
     # Entity resolution helpers
     # ─────────────────────────────────────────────────────────────────────────

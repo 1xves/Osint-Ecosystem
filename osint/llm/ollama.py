@@ -45,8 +45,19 @@ from osint.core.config import settings, MODEL_PARAMS
 log = logging.getLogger(__name__)
 
 # Default timeouts — generation can take a while on large models
-GENERATE_TIMEOUT = 180.0    # 3 minutes for qwen3:22b on complex prompts
+# 10 minutes covers even the longest briefing/verification sections on qwen3:14b.
+# 3 min (180s) was too short: 20 concurrent briefing requests all queue behind
+# each other in Ollama (which is serial) and expire before their turn starts.
+GENERATE_TIMEOUT = 600.0
 EMBED_TIMEOUT = 30.0
+
+# Maximum concurrent Ollama generate requests.
+# Ollama processes one generation at a time regardless of concurrency at the
+# HTTP layer — sending 20 parallel requests just fills Ollama's internal queue
+# and causes all but the first to hit GENERATE_TIMEOUT before they even start.
+# Serialising via a semaphore ensures each request is issued only after the
+# previous one completes, keeping effective latency predictable.
+_OLLAMA_CONCURRENCY = asyncio.Semaphore(1)
 
 
 class OllamaError(Exception):
@@ -82,7 +93,9 @@ class OllamaClient:
 
         self._client = httpx.AsyncClient(
             base_url=settings.ollama_host,
-            timeout=httpx.Timeout(GENERATE_TIMEOUT, connect=5.0),
+            # Use no-overall-timeout at the client level; per-request timeouts
+            # are applied individually in generate() / generate_json() / embed().
+            timeout=httpx.Timeout(None, connect=5.0),
         )
         try:
             resp = await self._client.get("/api/tags")
@@ -119,6 +132,7 @@ class OllamaClient:
         temperature: float | None = None,
         max_tokens: int | None = None,
         context: list[int] | None = None,   # Ollama conversation context
+        think: bool | None = None,           # qwen3: False disables thinking tokens
     ) -> dict[str, Any]:
         """
         Single-turn text generation via Ollama's /api/generate endpoint.
@@ -162,21 +176,28 @@ class OllamaClient:
             payload["format"] = "json"
         if context:
             payload["context"] = context
+        if think is not None:
+            payload["think"] = think
 
         start = time.monotonic()
-        try:
-            resp = await self._client.post(
-                "/api/generate",
-                json=payload,
-                timeout=GENERATE_TIMEOUT,
-            )
-            resp.raise_for_status()
-        except httpx.TimeoutException as e:
-            raise OllamaError(f"Ollama generate timed out for model {model}") from e
-        except httpx.HTTPStatusError as e:
-            raise OllamaError(
-                f"Ollama generate failed: HTTP {e.response.status_code} — {e.response.text}"
-            ) from e
+        # Serialize Ollama generate calls — Ollama is single-threaded per-model
+        # and queues requests internally. Sending N concurrent requests doesn't
+        # speed anything up; it just means N-1 of them wait in Ollama's queue
+        # and expire before their turn if GENERATE_TIMEOUT is short.
+        async with _OLLAMA_CONCURRENCY:
+            try:
+                resp = await self._client.post(
+                    "/api/generate",
+                    json=payload,
+                    timeout=GENERATE_TIMEOUT,
+                )
+                resp.raise_for_status()
+            except httpx.TimeoutException as e:
+                raise OllamaError(f"Ollama generate timed out for model {model}") from e
+            except httpx.HTTPStatusError as e:
+                raise OllamaError(
+                    f"Ollama generate failed: HTTP {e.response.status_code} — {e.response.text}"
+                ) from e
 
         data = resp.json()
         elapsed = time.monotonic() - start
@@ -211,20 +232,45 @@ class OllamaClient:
 
         Retries up to 2 times if the model produces invalid JSON.
         If all retries fail, raises OllamaError with the raw text in the message.
+
+        Thinking suppression: qwen3 models generate <think>...</think> tokens
+        that count against num_predict and leave no budget for actual JSON output,
+        producing empty {} responses. Prepending /no_think to the system prompt
+        disables thinking for JSON extraction calls — thinking is useful for
+        open-ended generation but harmful for structured output.
         """
+        # Disable qwen3 thinking for all JSON calls.
+        # Two complementary mechanisms:
+        # 1. Prepend /no_think to the USER PROMPT (qwen3 reads this from the
+        #    user turn, not system).  Must be first token in the user message.
+        # 2. Add think=False to options (Ollama ≥0.6 honours this natively and
+        #    ignores it silently on older versions / non-qwen3 models).
+        effective_prompt = "/no_think\n" + prompt
+
         last_text = ""
         for attempt in range(3):
             result = await self.generate(
                 model=model,
-                prompt=prompt,
+                prompt=effective_prompt,
                 system=system,
                 format="json",
                 temperature=temperature,
                 max_tokens=max_tokens,
+                think=False,
             )
             last_text = result["text"]
             try:
                 parsed = json.loads(last_text)
+                # Guard against empty-dict response: qwen3 sometimes returns {}
+                # when thinking tokens exhaust num_predict. Retry if so.
+                if parsed == {} and attempt < 2:
+                    log.warning(
+                        "generate_json: empty dict response on attempt %d/%d "
+                        "(model=%s) — retrying",
+                        attempt + 1, 3, model,
+                    )
+                    await asyncio.sleep(1.0)
+                    continue
                 return parsed, result
             except json.JSONDecodeError:
                 log.warning(

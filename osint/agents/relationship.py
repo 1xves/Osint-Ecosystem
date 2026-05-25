@@ -57,6 +57,7 @@ from difflib import SequenceMatcher
 from typing import Any
 
 from osint.agents.base import BaseAgent
+from osint.clients.littlesis import LittleSisClient, RELATIONSHIP_TO_PIPELINE_TYPE
 
 log = logging.getLogger(__name__)
 
@@ -77,13 +78,28 @@ SOURCE_QUALITY_MAP = {
     "crunchbase":          "primary",
     "fec_api":             "primary",
     "sec_edgar":           "primary",
+    "sec_form_d":          "primary",    # Regulatory filing — mandatory disclosure
     "propublica_nonprofit": "primary",
     "usaspending":         "primary",
     "courtlistener":       "primary",
-    "opencorporates":      "secondary",
+    "followthemoney":      "primary",    # State campaign finance filings — mandatory disclosure
+    "patent_view":         "primary",    # USPTO official patent database
+    "littlesis":           "secondary",  # Curated human-edited DB — not primary source
+    "opencorporates":      "secondary",  # Aggregated corporate registry — secondary source
     "serpapi":             "tertiary",
     "gdelt":               "tertiary",
+    "eventbrite":          "tertiary",
+    "meetup":              "tertiary",
+    "bizapedia":           "secondary",  # Aggregated SoS data — secondary source
+    "sos_pa":              "primary",    # PA SoS filing — official state record
+    "sos_de":              "primary",    # DE SoS filing — official state record
+    "wayback":             "tertiary",   # Archived web page — historical, may be stale
     "inferred":            "tertiary",
+    # Phase 8 — ETL bulk data
+    "hud":                 "primary",    # HUD FHA-insured loan portfolio — official government data
+    "fincen_ctr":          "primary",    # FinCEN CTR aggregate data — official government data
+    # Phase 9 — ICIJ Offshore Leaks
+    "icij_leaks":          "secondary",  # Leaked documents — high signal, not officially verified
 }
 
 # Canonical source URLs for structured data sources (used as evidence source_url)
@@ -95,6 +111,11 @@ SOURCE_URL_FALLBACKS = {
     "usaspending":  "https://api.usaspending.gov/api/v2/",
     "courtlistener": "https://www.courtlistener.com/",
     "opencorporates": "https://opencorporates.com",
+    # Phase 8
+    "hud":          "https://www.hud.gov/program_offices/housing/mfh/exp/mfhdiscl",
+    "fincen_ctr":   "https://www.fincen.gov/financial-crimes-enforcement-network",
+    # Phase 9
+    "icij_leaks":   "https://offshoreleaks.icij.org",
 }
 
 # Relationship types that require sensitive_claim=True
@@ -125,6 +146,10 @@ RELATIONSHIP_DIRECTION = {
     "ALUMNI_OF":                "directed",
     "AWARDED_CONTRACT_TO":      "directed",
     "REGULATORY_OVERSIGHT":     "directed",
+    # Phase 6 — web scrapers
+    "FORMERLY_EMPLOYED_BY":     "directed",   # Historical; from Wayback archived pages
+    # Phase 8 — ETL bulk data
+    "OWNS":                     "directed",   # Entity owns real estate (HUD insured properties)
 }
 
 # LLM system prompt for relationship inference
@@ -158,8 +183,74 @@ If no relationships are evident, return {{"relationships": []}}"""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Relationship strength formula (from spec §4.2)
+# Relationship strength formula v2 (Phase 11.2 — multi-factor confidence scoring)
 # ─────────────────────────────────────────────────────────────────────────────
+
+def _relationship_strength_v2(
+    evidence_count: int,
+    source_quality: str,
+    relationship_type: str,
+    is_direct: bool,
+    recency_days: int | None = None,
+    is_inferred: bool = False,
+) -> tuple[float, float]:
+    """
+    Multi-factor relationship strength + confidence score computation.
+
+    Returns:
+        (relationship_strength, confidence_score)
+        Both floats in [0.0, 1.0].
+
+    Factors:
+        1. Source quality tier:    primary=1.0, secondary=0.7, tertiary=0.4
+        2. Directness penalty:     indirect edges halved
+        3. Relationship type caps: MENTIONED_WITH ≤ 0.4, POLITICALLY_CONNECTED_TO ≤ 0.6
+        4. Evidence count boost:   +10% per additional source, capped at 1.5×
+        5. Recency decay:          evidence > 5 years old → 0.85×, > 10 years → 0.70×
+        6. Inference penalty:      inferred (not directly observed) → 0.60×, floor at 0.35
+
+    Separation of strength vs. confidence:
+        - relationship_strength: overall combined score for ranking/display
+        - confidence_score: float for DB storage + downstream ML features.
+          The confidence_score applies the inference penalty; relationship_strength
+          applies the evidence_count multiplier. They diverge for inferred edges
+          with multiple corroborating sources.
+    """
+    _QUALITY_BASE = {"primary": 1.0, "secondary": 0.7, "tertiary": 0.4}
+    base = _QUALITY_BASE.get(source_quality, 0.4)
+
+    if not is_direct:
+        base *= 0.5
+
+    # Type-level caps (weak relationship types are capped regardless of source quality)
+    if relationship_type == "MENTIONED_WITH":
+        base = min(base, 0.4)
+    elif relationship_type == "POLITICALLY_CONNECTED_TO":
+        base = min(base, 0.6)
+    elif relationship_type == "WORKS_UNDER":
+        # Always inferred; cap at 0.65 even with strong base
+        base = min(base, 0.65)
+
+    # Evidence count multiplier — corroboration from multiple sources increases confidence
+    multiplier = min(1.0 + (evidence_count - 1) * 0.1, 1.5)
+
+    # Recency factor — older evidence is less reliable
+    if recency_days is not None:
+        if recency_days > 3650:     # > 10 years
+            base *= 0.70
+        elif recency_days > 1825:   # > 5 years
+            base *= 0.85
+
+    # Inference penalty — inferred chains are inherently less certain
+    # Floor prevents inferred edges from reaching implausibly low scores
+    if is_inferred:
+        base = max(base * 0.60, 0.35)
+
+    strength       = round(min(base * multiplier, 1.0), 4)
+    confidence_score = round(min(base, 1.0), 4)   # score before multiplier (source-level certainty)
+
+    return strength, confidence_score
+
 
 def _relationship_strength(
     evidence_count: int,
@@ -167,16 +258,17 @@ def _relationship_strength(
     relationship_type: str,
     is_direct: bool,
 ) -> float:
-    base = {"primary": 1.0, "secondary": 0.7, "tertiary": 0.4}.get(source_quality, 0.4)
-    if not is_direct:
-        base *= 0.5
-    # Weak type caps
-    if relationship_type == "MENTIONED_WITH":
-        base = min(base, 0.4)
-    if relationship_type == "POLITICALLY_CONNECTED_TO":
-        base = min(base, 0.6)
-    multiplier = min(1.0 + (evidence_count - 1) * 0.1, 1.5)
-    return round(min(base * multiplier, 1.0), 4)
+    """
+    Legacy wrapper — preserved for any remaining call sites.
+    Phase 11 migrated all internal callers to _relationship_strength_v2().
+    """
+    strength, _ = _relationship_strength_v2(
+        evidence_count=evidence_count,
+        source_quality=source_quality,
+        relationship_type=relationship_type,
+        is_direct=is_direct,
+    )
+    return strength
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -187,6 +279,17 @@ _NAME_STRIP = str.maketrans("", "", ".,;:'-&/")
 
 def _norm(name: str) -> str:
     return " ".join(name.lower().translate(_NAME_STRIP).split())
+
+
+def _icij_source_label(source_id: str) -> str:
+    """Convert an ICIJ sourceID to a human-readable label for evidence snippets."""
+    _labels = {
+        "panama_papers":   "Panama Papers 2016",
+        "paradise_papers": "Paradise Papers 2017",
+        "pandora_papers":  "Pandora Papers 2021",
+        "offshore_leaks":  "ICIJ Offshore Leaks",
+    }
+    return _labels.get((source_id or "").lower(), source_id or "ICIJ")
 
 
 def _find_by_name(
@@ -273,10 +376,21 @@ class _RelBuilder:
         confidence: str = "medium",
         run_id: str = "",
         valid_from: str | None = None,
+        recency_days: int | None = None,
+        is_inferred: bool = False,
+        sensitive_claim: bool | None = None,
     ) -> None:
         """
         Add a candidate relationship to the draft list.
         Silently drops self-loops and duplicates.
+
+        Args:
+            recency_days:   Age of the evidence in days (for recency decay scoring).
+                            None means no decay is applied.
+            is_inferred:    True for 2-hop inferred edges (WORKS_UNDER). These
+                            receive a confidence penalty and are labeled "inferred".
+            sensitive_claim: Override for sensitive_claim flag. If None, inferred
+                            from rel_type and entity types.
         """
         source_id = source_entity.get("entity_id", "")
         target_id = target_entity.get("entity_id", "")
@@ -297,17 +411,21 @@ class _RelBuilder:
         self._seen.add(key)
 
         # Determine sensitive_claim
-        sensitive = (
-            rel_type in SENSITIVE_REL_TYPES
-            or source_entity.get("entity_type") == "illicit"
-            or target_entity.get("entity_type") == "illicit"
-        )
+        if sensitive_claim is None:
+            sensitive_claim = (
+                rel_type in SENSITIVE_REL_TYPES
+                or source_entity.get("entity_type") == "illicit"
+                or target_entity.get("entity_type") == "illicit"
+            )
 
-        strength = _relationship_strength(
+        # Phase 11.2 — multi-factor confidence scoring
+        strength, confidence_score = _relationship_strength_v2(
             evidence_count=1,
             source_quality=source_quality,
             relationship_type=rel_type,
             is_direct=source_quality in ("primary", "secondary"),
+            recency_days=recency_days,
+            is_inferred=is_inferred,
         )
 
         self.draft.append({
@@ -324,9 +442,11 @@ class _RelBuilder:
             "_source_url":      source_url,
             "_source_quality":  source_quality,
             "confidence":       confidence,
+            "confidence_score": confidence_score,  # Phase 11.2 — float for DB
             "relationship_strength": strength,
-            "sensitive_claim":  sensitive,
+            "sensitive_claim":  sensitive_claim,
             "verified":         False,
+            "is_inferred":      is_inferred,
             "valid_from":       valid_from,
             "valid_to":         None,
         })
@@ -377,6 +497,24 @@ class RelationshipAgent(BaseAgent):
         self._extract_subsidiary_of(by_type, name_index, rb, run_id)
         self._extract_co_investments(rb, run_id)
         self._extract_co_founders(rb, run_id)
+        # LittleSis pre-built relationship edges — stored in enrichment phase
+        self._extract_littlesis_relationships(entities, name_index, rb, run_id)
+        # FollowTheMoney donation edges
+        self._extract_ftm_relationships(by_type, name_index, rb, run_id)
+        # OpenCorporates officer edges
+        self._extract_opencorporates_relationships(by_type, name_index, rb, run_id)
+        # Bizapedia officer / registered-agent edges
+        self._extract_bizapedia_relationships(by_type, name_index, rb, run_id)
+        # Wayback Machine historical executive edges
+        self._extract_wayback_relationships(by_type, name_index, rb, run_id)
+        # CourtListener litigation edges (Phase 7) — all entity types
+        self._extract_courtlistener_litigation(entities, name_index, rb, run_id)
+        # EDGAR document extraction officer/director edges (Phase 7)
+        self._extract_edgar_doc_relationships(by_type, name_index, rb, run_id)
+        # HUD multifamily property OWNS edges (Phase 8 — ETL bulk data)
+        self._extract_hud_relationships(by_type, name_index, rb, run_id)
+        # ICIJ offshore entity links (Phase 9 — Neo4j subgraph)
+        self._extract_icij_relationships(by_type, name_index, rb, run_id)
 
         log.info(
             "relationship_agent: structural extraction found %d candidate edges",
@@ -385,6 +523,9 @@ class RelationshipAgent(BaseAgent):
 
         # ── LLM inference for MENTIONED_WITH / POLITICALLY_CONNECTED_TO ───────
         await self._llm_inference_pass(entities, name_index, rb, run_id)
+
+        # ── Phase 11.3 — 2-hop WORKS_UNDER inference ─────────────────────────
+        self._infer_works_under(entities, rb, run_id)
 
         # ── Write evidence + relationships to DB ──────────────────────────────
         written, rejected = await self._write_relationships(rb.draft, run_id)
@@ -819,6 +960,815 @@ class RelationshipAgent(BaseAgent):
                     run_id=run_id,
                 )
 
+    def _extract_ftm_relationships(
+        self,
+        by_type: dict[str, list[dict[str, Any]]],
+        name_index: dict[str, list[dict[str, Any]]],
+        rb: _RelBuilder,
+        run_id: str,
+    ) -> None:
+        """
+        Create DONATED_TO edges from FollowTheMoney data stored by enrichment_agent.
+
+        Two data shapes:
+          1. Politician/political entities have category_fields["ftm_contributions"] —
+             a list of donors who gave to this politician. Each donor is resolved
+             to a pipeline entity and a DONATED_TO edge is created.
+
+          2. Executive_hnw/hnwi entities have category_fields["ftm_donation_targets"] —
+             a list of political entities they donated to. Each target is resolved
+             and a DONATED_TO edge is created (donor → target direction).
+
+        Both shapes produce the same DONATED_TO edge type, just from different
+        perspectives.
+        """
+        ftm_url = "https://www.followthemoney.org"
+        edges_added = 0
+
+        # Shape 1: politician/political received donations from named donors
+        for pol in list(by_type.get("politician", [])) + list(by_type.get("political", [])):
+            cat = pol.get("category_fields", {})
+            contributions = cat.get("ftm_contributions")
+            if not contributions or not isinstance(contributions, list):
+                continue
+
+            for contrib in contributions:
+                donor_name = contrib.get("donor_name", "")
+                if not donor_name:
+                    continue
+                amount = contrib.get("amount", 0)
+                year   = contrib.get("year", "")
+
+                donor = (
+                    _find_by_name(name_index, donor_name, "executive_hnw")
+                    or _find_by_name(name_index, donor_name, "hnwi")
+                    or _find_by_name(name_index, donor_name, "corporate")
+                    or _find_by_name(name_index, donor_name, "investor")
+                )
+                if not donor:
+                    continue
+
+                snippet = (
+                    f"{donor.get('canonical_name')} donated ${amount:,} to "
+                    f"{pol.get('canonical_name')} (FollowTheMoney{', ' + str(year) if year else ''})"
+                )
+                rb.add(
+                    source_entity=donor,
+                    target_entity=pol,
+                    rel_type="DONATED_TO",
+                    evidence_snippet=snippet[:500],
+                    source_url=ftm_url,
+                    source_quality="primary",
+                    confidence="high",
+                    run_id=run_id,
+                )
+                edges_added += 1
+
+        # Shape 2: executive_hnw/hnwi made donations to named political targets
+        for exec_entity in list(by_type.get("executive_hnw", [])) + list(by_type.get("hnwi", [])):
+            cat = exec_entity.get("category_fields", {})
+            targets = cat.get("ftm_donation_targets")
+            if not targets or not isinstance(targets, list):
+                continue
+
+            for t in targets:
+                target_name = t.get("target_name", "")
+                if not target_name:
+                    continue
+                amount = t.get("amount", 0)
+                year   = t.get("year", "")
+
+                pol = (
+                    _find_by_name(name_index, target_name, "politician")
+                    or _find_by_name(name_index, target_name, "political")
+                )
+                if not pol:
+                    continue
+
+                snippet = (
+                    f"{exec_entity.get('canonical_name')} donated ${amount:,} to "
+                    f"{pol.get('canonical_name')} (FollowTheMoney{', ' + str(year) if year else ''})"
+                )
+                rb.add(
+                    source_entity=exec_entity,
+                    target_entity=pol,
+                    rel_type="DONATED_TO",
+                    evidence_snippet=snippet[:500],
+                    source_url=ftm_url,
+                    source_quality="primary",
+                    confidence="high",
+                    run_id=run_id,
+                )
+                edges_added += 1
+
+        if edges_added:
+            log.info(
+                "relationship_agent: FollowTheMoney extraction added %d DONATED_TO edges",
+                edges_added,
+            )
+
+    def _extract_opencorporates_relationships(
+        self,
+        by_type: dict[str, list[dict[str, Any]]],
+        name_index: dict[str, list[dict[str, Any]]],
+        rb: _RelBuilder,
+        run_id: str,
+    ) -> None:
+        """
+        Create EMPLOYED_BY edges from OpenCorporates officer data stored by enrichment_agent.
+
+        enrichment_agent._run_opencorporates_enrichment() stores officer lists in
+        category_fields["opencorporates_officers"] for corporate entities. Each officer
+        entry has {name, position, start_date}.
+
+        This method resolves officer names to pipeline entities and creates EMPLOYED_BY
+        or SITS_ON_BOARD_OF edges based on the position string.
+
+        Only creates edges when the officer name matches a known pipeline entity —
+        we don't create stub entities here (that's done via the Form D stub pattern).
+        """
+        oc_url = "https://opencorporates.com"
+        edges_added = 0
+
+        for corp in by_type.get("corporate", []):
+            cat = corp.get("category_fields", {})
+            officers = cat.get("opencorporates_officers")
+            if not officers or not isinstance(officers, list):
+                continue
+
+            corp_name = corp.get("canonical_name", "")
+            oc_data = cat.get("opencorporates_data", {})
+            company_url = oc_data.get("opencorporates_url", oc_url)
+
+            for officer in officers:
+                officer_name = officer.get("name", "")
+                position     = officer.get("position", "").lower()
+                start_date   = officer.get("start_date", "")
+
+                if not officer_name:
+                    continue
+
+                person = (
+                    _find_by_name(name_index, officer_name, "executive_hnw")
+                    or _find_by_name(name_index, officer_name, "hnwi")
+                    or _find_by_name(name_index, officer_name, "investor")
+                )
+                if not person:
+                    continue
+
+                # Determine relationship type from position string
+                board_keywords = ("director", "trustee", "board", "governor", "chairman", "chair")
+                exec_keywords  = ("ceo", "cfo", "coo", "president", "officer", "executive", "managing")
+
+                if any(kw in position for kw in board_keywords):
+                    rel_type = "SITS_ON_BOARD_OF"
+                elif any(kw in position for kw in exec_keywords):
+                    rel_type = "EMPLOYED_BY"
+                else:
+                    # Registered agents, generic officers → EMPLOYED_BY
+                    rel_type = "EMPLOYED_BY"
+
+                snippet = (
+                    f"{person.get('canonical_name')} is {officer.get('position', 'officer')} "
+                    f"of {corp_name} (OpenCorporates{', since ' + start_date if start_date else ''})"
+                )
+                rb.add(
+                    source_entity=person,
+                    target_entity=corp,
+                    rel_type=rel_type,
+                    evidence_snippet=snippet[:500],
+                    source_url=company_url,
+                    source_quality="secondary",
+                    confidence="medium",
+                    run_id=run_id,
+                    valid_from=start_date or None,
+                )
+                edges_added += 1
+
+        if edges_added:
+            log.info(
+                "relationship_agent: OpenCorporates extraction added %d officer edges",
+                edges_added,
+            )
+
+    def _extract_bizapedia_relationships(
+        self,
+        by_type: dict[str, list[dict[str, Any]]],
+        name_index: dict[str, list[dict[str, Any]]],
+        rb: _RelBuilder,
+        run_id: str,
+    ) -> None:
+        """
+        Create EMPLOYED_BY edges from Bizapedia officer data stored by enrichment_agent.
+
+        enrichment_agent._run_bizapedia_enrichment() stores:
+            category_fields["bizapedia_data"]["officers"] = [{name, title}]
+
+        Resolves officer names to pipeline entities and creates edges.
+        Also creates IS_REGISTERED_AGENT_OF edges if the registered agent
+        matches a known entity (useful for shell company network analysis).
+        """
+        edges_added = 0
+
+        for corp in by_type.get("corporate", []) + by_type.get("investor", []):
+            cat      = corp.get("category_fields", {})
+            biz_data = cat.get("bizapedia_data")
+            if not biz_data or not isinstance(biz_data, dict):
+                continue
+
+            corp_name  = corp.get("canonical_name", "")
+            source_url = biz_data.get("source_url", "https://www.bizapedia.com")
+
+            # ── Officer edges ──────────────────────────────────────────────────
+            for officer in biz_data.get("officers", []):
+                officer_name = officer.get("name", "")
+                title        = officer.get("title", "")
+
+                if not officer_name:
+                    continue
+
+                person = (
+                    _find_by_name(name_index, officer_name, "executive_hnw")
+                    or _find_by_name(name_index, officer_name, "hnwi")
+                    or _find_by_name(name_index, officer_name, "investor")
+                )
+                if not person:
+                    continue
+
+                title_lower = title.lower()
+                board_kws   = ("director", "trustee", "board", "governor", "chairman", "chair")
+                if any(kw in title_lower for kw in board_kws):
+                    rel_type = "SITS_ON_BOARD_OF"
+                else:
+                    rel_type = "EMPLOYED_BY"
+
+                snippet = (
+                    f"{person.get('canonical_name')} is {title or 'officer'} "
+                    f"of {corp_name} (Bizapedia)"
+                )
+                rb.add(
+                    source_entity=person,
+                    target_entity=corp,
+                    rel_type=rel_type,
+                    evidence_snippet=snippet[:500],
+                    source_url=source_url,
+                    source_quality="secondary",
+                    confidence="medium",
+                    run_id=run_id,
+                )
+                edges_added += 1
+
+        if edges_added:
+            log.info(
+                "relationship_agent: Bizapedia extraction added %d officer edges",
+                edges_added,
+            )
+
+    def _extract_wayback_relationships(
+        self,
+        by_type: dict[str, list[dict[str, Any]]],
+        name_index: dict[str, list[dict[str, Any]]],
+        rb: _RelBuilder,
+        run_id: str,
+    ) -> None:
+        """
+        Create FORMERLY_EMPLOYED_BY edges from Wayback Machine historical executive
+        data stored by enrichment_agent.
+
+        enrichment_agent._run_wayback_enrichment() stores:
+            category_fields["wayback_executives"] = [
+                {name, title, snapshot_url, snapshot_date, source}
+            ]
+
+        Uses lower confidence than current employment edges — archived pages may
+        be outdated and the person may no longer be with the company.
+        """
+        edges_added = 0
+
+        for corp in by_type.get("corporate", []) + by_type.get("investor", []):
+            cat              = corp.get("category_fields", {})
+            wayback_execs    = cat.get("wayback_executives")
+            if not wayback_execs or not isinstance(wayback_execs, list):
+                continue
+
+            corp_name = corp.get("canonical_name", "")
+
+            for exec_entry in wayback_execs:
+                exec_name    = exec_entry.get("name", "")
+                title        = exec_entry.get("title", "")
+                snapshot_url = exec_entry.get("snapshot_url", "")
+                snap_date    = exec_entry.get("snapshot_date", "")
+
+                if not exec_name:
+                    continue
+
+                person = (
+                    _find_by_name(name_index, exec_name, "executive_hnw")
+                    or _find_by_name(name_index, exec_name, "hnwi")
+                    or _find_by_name(name_index, exec_name, "investor")
+                )
+                if not person:
+                    continue
+
+                date_note = f" as of {snap_date}" if snap_date else ""
+                snippet   = (
+                    f"{person.get('canonical_name')} was {title or 'executive'} "
+                    f"of {corp_name}{date_note} (Wayback Machine archive)"
+                )
+                rb.add(
+                    source_entity=person,
+                    target_entity=corp,
+                    rel_type="FORMERLY_EMPLOYED_BY",
+                    evidence_snippet=snippet[:500],
+                    source_url=snapshot_url or "https://web.archive.org",
+                    source_quality="tertiary",
+                    confidence="low",       # Historical — may be stale
+                    run_id=run_id,
+                    valid_from=snap_date or None,
+                )
+                edges_added += 1
+
+        if edges_added:
+            log.info(
+                "relationship_agent: Wayback extraction added %d historical exec edges",
+                edges_added,
+            )
+
+    def _extract_courtlistener_litigation(
+        self,
+        entities: list[dict[str, Any]],
+        name_index: dict[str, list[dict[str, Any]]],
+        rb: _RelBuilder,
+        run_id: str,
+    ) -> None:
+        """
+        Create LITIGATION_AGAINST edges from CourtListener data stored by enrichment_agent.
+
+        enrichment_agent._run_litigation_enrichment() stores:
+            category_fields["litigation"] = [
+                {case_name, case_number, court, filing_date, case_type,
+                 plaintiffs, defendants, outcome, monetary_judgment, summary, docket_url}
+            ]
+
+        Runs across ALL entity types (corporate, investor, executive_hnw, illicit) —
+        more comprehensive than the existing _extract_litigation_against which only
+        reads from illicit entities.
+
+        Strategy:
+          - If the case has a structured plaintiffs/defendants list, try to resolve each
+            to a known pipeline entity and create directed LITIGATION_AGAINST edges.
+          - If only the searched entity name is available (no party resolution possible),
+            create a self-referential sentinel edge noting the entity was a party.
+          - monetary_judgment is stored in edge metadata for financial risk scoring.
+        """
+        source_url = SOURCE_URL_FALLBACKS["courtlistener"]
+        edges_added = 0
+
+        for entity in entities:
+            cat        = entity.get("category_fields", {})
+            litigation = cat.get("litigation")
+            if not litigation or not isinstance(litigation, list):
+                continue
+
+            entity_name = entity.get("canonical_name", "")
+
+            for case in litigation:
+                if not isinstance(case, dict):
+                    continue
+
+                case_name       = case.get("case_name") or case.get("name", "Unknown case")
+                court           = case.get("court", "")
+                filing_date     = case.get("filing_date") or case.get("date_filed")
+                outcome         = case.get("outcome")
+                monetary_value  = case.get("monetary_judgment")
+                summary         = case.get("summary", "")
+                docket_url      = case.get("docket_url", source_url)
+
+                plaintiffs  = case.get("plaintiffs", []) or []
+                defendants  = case.get("defendants", []) or []
+
+                # Try to resolve listed parties to pipeline entities
+                resolved_plaintiffs  = [e for p in plaintiffs for e in [_find_by_name(name_index, p)] if e]
+                resolved_defendants  = [e for d in defendants for e in [_find_by_name(name_index, d)] if e]
+
+                outcome_note = f" (outcome: {outcome})" if outcome else ""
+                money_note   = f" (${monetary_value:,})" if monetary_value else ""
+                snippet_base = (
+                    f"{case_name} — {court}{outcome_note}{money_note}. "
+                    f"{summary[:200]}"
+                ).strip()
+
+                if resolved_plaintiffs and resolved_defendants:
+                    # Full resolution: write P→D edges
+                    for p_ent in resolved_plaintiffs:
+                        for d_ent in resolved_defendants:
+                            rb.add(
+                                source_entity=p_ent,
+                                target_entity=d_ent,
+                                rel_type="LITIGATION_AGAINST",
+                                evidence_snippet=snippet_base[:500],
+                                source_url=docket_url,
+                                source_quality="primary",
+                                confidence="high",
+                                run_id=run_id,
+                                valid_from=filing_date,
+                            )
+                            edges_added += 1
+                else:
+                    # Partial resolution: entity is a party, create edge to itself as note
+                    # or to any resolved counterparty
+                    counterparties = resolved_defendants or resolved_plaintiffs
+                    for counter in counterparties:
+                        if counter.get("entity_id") == entity.get("entity_id"):
+                            continue
+                        rb.add(
+                            source_entity=entity,
+                            target_entity=counter,
+                            rel_type="LITIGATION_AGAINST",
+                            evidence_snippet=snippet_base[:500],
+                            source_url=docket_url,
+                            source_quality="primary",
+                            confidence="medium",
+                            run_id=run_id,
+                            valid_from=filing_date,
+                        )
+                        edges_added += 1
+
+        if edges_added:
+            log.info(
+                "relationship_agent: CourtListener litigation added %d edges",
+                edges_added,
+            )
+
+    def _extract_edgar_doc_relationships(
+        self,
+        by_type: dict[str, list[dict[str, Any]]],
+        name_index: dict[str, list[dict[str, Any]]],
+        rb: _RelBuilder,
+        run_id: str,
+    ) -> None:
+        """
+        Create EMPLOYED_BY and SITS_ON_BOARD_OF edges from EDGAR document extraction
+        data stored by enrichment_agent._run_edgar_doc_enrichment().
+
+        Reads three fields:
+          category_fields["exec_compensation"]     — from DEF 14A proxy statements
+          category_fields["annual_report_officers"] — from 10-K officer section
+          category_fields["annual_report_directors"] — from 10-K director section
+
+        Name resolution: tries executive_hnw first, then hnwi, then investor.
+        Only creates edges for names that resolve to known pipeline entities.
+        """
+        source_url = SOURCE_URL_FALLBACKS["sec_edgar"]
+        edges_added = 0
+
+        all_corps = by_type.get("corporate", []) + by_type.get("investor", [])
+
+        for corp in all_corps:
+            cat       = corp.get("category_fields", {})
+            corp_name = corp.get("canonical_name", "")
+
+            # ── DEF 14A executive compensation ────────────────────────────────
+            for exec_rec in cat.get("exec_compensation", []):
+                if not isinstance(exec_rec, dict):
+                    continue
+                exec_name = exec_rec.get("name", "")
+                title     = exec_rec.get("title", "")
+                total_comp = exec_rec.get("total_compensation")
+                year      = exec_rec.get("fiscal_year")
+
+                if not exec_name:
+                    continue
+
+                person = (
+                    _find_by_name(name_index, exec_name, "executive_hnw")
+                    or _find_by_name(name_index, exec_name, "hnwi")
+                )
+                if not person:
+                    continue
+
+                comp_note = f" (total comp: ${total_comp:,})" if total_comp else ""
+                year_note = f" in FY{year}" if year else ""
+                snippet   = (
+                    f"{person.get('canonical_name')} served as {title or 'executive'} "
+                    f"of {corp_name}{year_note}{comp_note} (DEF 14A proxy statement)"
+                )
+                rb.add(
+                    source_entity=person,
+                    target_entity=corp,
+                    rel_type="EMPLOYED_BY",
+                    evidence_snippet=snippet[:500],
+                    source_url=source_url,
+                    source_quality="primary",
+                    confidence="high",
+                    run_id=run_id,
+                )
+                edges_added += 1
+
+            # ── 10-K annual report officers ───────────────────────────────────
+            for officer in cat.get("annual_report_officers", []):
+                if not isinstance(officer, dict):
+                    continue
+                officer_name = officer.get("name", "")
+                title        = officer.get("title", "")
+                tenure_start = officer.get("tenure_start_year")
+
+                if not officer_name:
+                    continue
+
+                person = (
+                    _find_by_name(name_index, officer_name, "executive_hnw")
+                    or _find_by_name(name_index, officer_name, "hnwi")
+                )
+                if not person:
+                    continue
+
+                snippet = (
+                    f"{person.get('canonical_name')} is {title or 'officer'} "
+                    f"of {corp_name}"
+                    + (f" since {tenure_start}" if tenure_start else "")
+                    + " (SEC 10-K annual report)"
+                )
+                rb.add(
+                    source_entity=person,
+                    target_entity=corp,
+                    rel_type="EMPLOYED_BY",
+                    evidence_snippet=snippet[:500],
+                    source_url=source_url,
+                    source_quality="primary",
+                    confidence="high",
+                    run_id=run_id,
+                )
+                edges_added += 1
+
+            # ── 10-K annual report directors ──────────────────────────────────
+            for director in cat.get("annual_report_directors", []):
+                if not isinstance(director, dict):
+                    continue
+                dir_name     = director.get("name", "")
+                title        = director.get("title", "")
+                independence = director.get("independence", "")
+
+                if not dir_name:
+                    continue
+
+                person = (
+                    _find_by_name(name_index, dir_name, "executive_hnw")
+                    or _find_by_name(name_index, dir_name, "hnwi")
+                    or _find_by_name(name_index, dir_name, "investor")
+                )
+                if not person:
+                    continue
+
+                indep_note = f" ({independence})" if independence else ""
+                snippet    = (
+                    f"{person.get('canonical_name')} serves as {title or 'director'}"
+                    f"{indep_note} of {corp_name} (SEC 10-K annual report)"
+                )
+                rb.add(
+                    source_entity=person,
+                    target_entity=corp,
+                    rel_type="SITS_ON_BOARD_OF",
+                    evidence_snippet=snippet[:500],
+                    source_url=source_url,
+                    source_quality="primary",
+                    confidence="high",
+                    run_id=run_id,
+                )
+                edges_added += 1
+
+        if edges_added:
+            log.info(
+                "relationship_agent: EDGAR document extraction added %d officer/director edges",
+                edges_added,
+            )
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # HUD Multifamily Property OWNS edges (Phase 8)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _extract_hud_relationships(
+        self,
+        by_type: dict[str, list[dict[str, Any]]],
+        name_index: dict[str, list[dict[str, Any]]],
+        rb: _RelBuilder,
+        run_id: str,
+    ) -> None:
+        """
+        Create OWNS edges from HUD multifamily property data stored by
+        enrichment_agent._run_hud_enrichment().
+
+        enrichment_agent stores:
+            category_fields["hud_properties"] = [
+                {property_name, owner_name, city, state, zip_code,
+                 loan_amount, loan_status, program_type, units, maturity_date}
+            ]
+
+        For each property, we create:
+            entity → OWNS → synthetic property node (if no match in pipeline)
+                OR
+            entity → OWNS → matched real_estate entity (if name resolves)
+
+        Property nodes that don't match existing pipeline entities are created
+        as synthetic MENTIONED_WITH targets — this is intentional, since the
+        pipeline may not have seeded all properties as entities.
+
+        Synthetic property evidence snippet includes: property name, city,
+        state, loan amount (if available), HUD program type.
+        """
+        source_url = SOURCE_URL_FALLBACKS["hud"]
+        edges_added = 0
+
+        # Eligible entity types for HUD ownership
+        eligible = by_type.get("corporate", []) + by_type.get("real_estate", []) + by_type.get("investor", [])
+
+        for entity in eligible:
+            cat        = entity.get("category_fields", {})
+            properties = cat.get("hud_properties")
+            if not properties or not isinstance(properties, list):
+                continue
+
+            for prop in properties:
+                if not isinstance(prop, dict):
+                    continue
+
+                prop_name  = prop.get("property_name", "")
+                city       = prop.get("city", "")
+                state      = prop.get("state", "")
+                loan_amt   = prop.get("loan_amount")
+                program    = prop.get("program_type", "")
+                status     = prop.get("loan_status", "")
+                units      = prop.get("units")
+
+                if not prop_name:
+                    continue
+
+                # Try to resolve property to an existing pipeline entity
+                target = _find_by_name(name_index, prop_name, "real_estate")
+
+                if target is None:
+                    # Property not in pipeline — create a synthetic minimal entity
+                    # to represent it as a target of the OWNS edge.
+                    # Use the property's ZIP as the entity_id seed for uniqueness.
+                    zip_code = prop.get("zip_code", "")
+                    prop_id  = f"hud_prop_{prop_name[:40].lower().replace(' ', '_')}_{zip_code}"
+                    target = {
+                        "entity_id":     prop_id,
+                        "canonical_name": prop_name,
+                        "entity_type":   "real_estate",
+                        "primary_city":  city,
+                        "primary_state": state,
+                    }
+
+                # Build evidence snippet
+                loc_parts = [p for p in [city, state] if p]
+                location  = ", ".join(loc_parts)
+                loan_str  = f" (FHA loan: ${loan_amt:,.0f})" if loan_amt else ""
+                prog_str  = f" [{program}]" if program else ""
+                units_str = f", {units} units" if units else ""
+                snippet   = (
+                    f"{entity.get('canonical_name')} owns {prop_name}"
+                    f"{(' in ' + location) if location else ''}"
+                    f"{units_str}{loan_str}{prog_str} — HUD FHA-insured multifamily property"
+                )
+
+                rb.add(
+                    source_entity=entity,
+                    target_entity=target,
+                    rel_type="OWNS",
+                    evidence_snippet=snippet[:500],
+                    source_url=source_url,
+                    source_quality="primary",
+                    confidence="high",
+                    run_id=run_id,
+                )
+                edges_added += 1
+
+        if edges_added:
+            log.info(
+                "relationship_agent: HUD property data added %d OWNS edges",
+                edges_added,
+            )
+
+    def _extract_icij_relationships(
+        self,
+        by_type: dict[str, list[dict[str, Any]]],
+        name_index: dict[str, list[dict[str, Any]]],
+        rb: _RelBuilder,
+        run_id: str,
+    ) -> None:
+        """
+        Emit OFFSHORE_ENTITY_LINKED_TO edges between pipeline entities that
+        share ICIJ node IDs in their offshore shell chains.
+
+        enrichment_agent stores:
+            category_fields["icij_nodes"]       — direct ICIJ matches for this entity
+            category_fields["icij_shell_chain"] — connected ICIJ nodes (up to depth 4)
+            category_fields["offshore_flag"]    — True if any match found
+
+        Logic:
+            1. Build an index: icij_id → [pipeline_entities that reference it]
+               (includes both direct matches and shell chain nodes)
+            2. For each icij_id referenced by 2+ pipeline entities, emit
+               OFFSHORE_ENTITY_LINKED_TO between each pair.
+
+        Edge confidence: "medium" — ICIJ data is from leaked documents, not
+        officially verified. Evidence snippet includes the shared ICIJ node name
+        and the source leak (Panama Papers, etc.).
+
+        Sensitive: all ICIJ-sourced edges carry sensitive_claim=True.
+        """
+        source_url = SOURCE_URL_FALLBACKS.get("icij_leaks", "https://offshoreleaks.icij.org")
+        edges_added = 0
+
+        # Eligible entity types for ICIJ screening
+        eligible_types = {"corporate", "investor", "illicit"}
+        eligible: list[dict[str, Any]] = []
+        for et in eligible_types:
+            eligible.extend(by_type.get(et, []))
+
+        if len(eligible) < 2:
+            return  # Need at least 2 entities to form a connection
+
+        # ── Build index: icij_id → [{entity, icij_node_info}] ───────────────
+        icij_to_entities: dict[str, list[dict[str, Any]]] = {}
+
+        for entity in eligible:
+            cat = entity.get("category_fields", {})
+            if not cat.get("offshore_flag"):
+                continue
+
+            # Collect all ICIJ node IDs referenced by this entity
+            referenced_ids: dict[str, dict] = {}
+
+            # Direct matches
+            for match in cat.get("icij_nodes", []):
+                icij_id = match.get("icij_id", "")
+                if icij_id:
+                    referenced_ids[icij_id] = match
+
+            # Shell chain nodes (indirect connections)
+            for chain_node in cat.get("icij_shell_chain", []):
+                icij_id = chain_node.get("icij_id", "")
+                if icij_id and icij_id not in referenced_ids:
+                    referenced_ids[icij_id] = chain_node
+
+            for icij_id, icij_info in referenced_ids.items():
+                if icij_id not in icij_to_entities:
+                    icij_to_entities[icij_id] = []
+                icij_to_entities[icij_id].append({
+                    "entity":    entity,
+                    "icij_info": icij_info,
+                })
+
+        # ── Emit OFFSHORE_ENTITY_LINKED_TO for each shared ICIJ node ────────
+        emitted_pairs: set[frozenset] = set()
+
+        for icij_id, refs in icij_to_entities.items():
+            if len(refs) < 2:
+                continue
+
+            for i in range(len(refs)):
+                for j in range(i + 1, len(refs)):
+                    ent_a    = refs[i]["entity"]
+                    ent_b    = refs[j]["entity"]
+                    info     = refs[i]["icij_info"]  # use first ref's ICIJ info for snippet
+
+                    pair = frozenset([
+                        ent_a.get("entity_id", ""),
+                        ent_b.get("entity_id", ""),
+                    ])
+                    if pair in emitted_pairs:
+                        continue
+                    emitted_pairs.add(pair)
+
+                    icij_name    = info.get("name", icij_id)
+                    source_label = _icij_source_label(info.get("source_dataset", ""))
+                    snippet = (
+                        f"{ent_a.get('canonical_name')} and "
+                        f"{ent_b.get('canonical_name')} are linked via "
+                        f"ICIJ offshore entity '{icij_name}' ({source_label})"
+                    )
+
+                    rb.add(
+                        source_entity=ent_a,
+                        target_entity=ent_b,
+                        rel_type="OFFSHORE_ENTITY_LINKED_TO",
+                        evidence_snippet=snippet[:500],
+                        source_url=source_url,
+                        source_quality="secondary",
+                        confidence="medium",
+                        sensitive_claim=True,
+                        run_id=run_id,
+                    )
+                    edges_added += 1
+
+        if edges_added:
+            log.info(
+                "relationship_agent: ICIJ data added %d OFFSHORE_ENTITY_LINKED_TO edges",
+                edges_added,
+            )
+
     def _extract_co_investments(self, rb: _RelBuilder, run_id: str) -> None:
         """
         Derive CO_INVESTED_WITH from INVESTED_IN edges already in rb.draft.
@@ -901,6 +1851,249 @@ class RelationshipAgent(BaseAgent):
                     )
 
     # ─────────────────────────────────────────────────────────────────────────
+    # LittleSis pre-built relationship edges
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _extract_littlesis_relationships(
+        self,
+        entities: list[dict[str, Any]],
+        name_index: dict[str, list[dict[str, Any]]],
+        rb: _RelBuilder,
+        run_id: str,
+    ) -> None:
+        """
+        Create relationship edges from LittleSis relationships stored by enrichment_agent.
+
+        enrichment_agent._run_littlesis_enrichment() stores a list of raw LittleSis
+        relationship attribute dicts in entity["category_fields"]["littlesis_relationships"].
+        Each dict has: entity1_id, entity2_id, category_id, description1,
+        is_current, start_date, end_date, label, littlesis_url.
+
+        We need to resolve both endpoints to pipeline entities. Since LittleSis
+        uses its own numeric IDs, we resolve via name matching:
+          1. Build a map from littlesis_id → pipeline entity for all enriched entities.
+          2. For each relationship, look up both endpoints by littlesis_id.
+          3. If both endpoints are in the pipeline: add edge to _RelBuilder.
+          4. If one endpoint is missing: skip for now (stub entity pattern comes later).
+
+        Only handles relationship categories that map to known pipeline types
+        (Position, Donation, Lobbying, Ownership, Professional). Social and
+        Family relationships are skipped — too noisy without additional verification.
+        """
+        # ── Build littlesis_id → pipeline entity map ──────────────────────────
+        ls_id_to_entity: dict[str | int, dict[str, Any]] = {}
+        for entity in entities:
+            cat = entity.get("category_fields", {})
+            ls_id = cat.get("littlesis_id")
+            if ls_id is not None:
+                ls_id_to_entity[ls_id] = entity
+
+        if not ls_id_to_entity:
+            return  # No LittleSis-enriched entities — nothing to do
+
+        # ── Process each entity's LittleSis relationships ─────────────────────
+        edges_added = 0
+        for entity in entities:
+            cat = entity.get("category_fields", {})
+            ls_rels = cat.get("littlesis_relationships")
+            if not ls_rels or not isinstance(ls_rels, list):
+                continue
+
+            for rel in ls_rels:
+                category_id = rel.get("category_id")
+                if category_id is None:
+                    continue
+
+                # Skip categories that don't map to pipeline relationship types
+                pipeline_type = LittleSisClient.get_pipeline_relationship_type(category_id)
+                if not pipeline_type:
+                    continue
+
+                entity1_id = rel.get("entity1_id")
+                entity2_id = rel.get("entity2_id")
+                if not entity1_id or not entity2_id:
+                    continue
+
+                # Resolve both endpoints to pipeline entities
+                source_entity = ls_id_to_entity.get(entity1_id)
+                target_entity = ls_id_to_entity.get(entity2_id)
+
+                if not source_entity or not target_entity:
+                    # At least one endpoint not in pipeline — skip for now
+                    # The stub entity pattern will handle this in a future iteration
+                    continue
+
+                # Map LittleSis pipeline type to the OSINT relationship enum
+                rel_type_map = {
+                    "board_membership":          "SITS_ON_BOARD_OF",
+                    "donation":                  "DONATED_TO",
+                    "lobbying":                  "LOBBYING_FOR",
+                    "business_ownership":        "SUBSIDIARY_OF",
+                    "professional_collaboration": "MENTIONED_WITH",
+                    "membership":                "MENTIONED_WITH",
+                }
+                osint_type = rel_type_map.get(pipeline_type, "MENTIONED_WITH")
+
+                # Skip undirected weak type for Position — use SITS_ON_BOARD_OF
+                if category_id == 1:   # Position
+                    role_desc = rel.get("description1") or rel.get("label", "")
+                    if role_desc and any(t in role_desc.lower() for t in ("board", "director", "trustee", "governor")):
+                        osint_type = "SITS_ON_BOARD_OF"
+                    elif role_desc and any(t in role_desc.lower() for t in ("ceo", "cfo", "president", "executive", "officer")):
+                        osint_type = "EMPLOYED_BY"
+                    else:
+                        osint_type = "SITS_ON_BOARD_OF"  # Default Position → board seat
+
+                ls_url = rel.get("littlesis_url", "https://littlesis.org")
+                description1 = LittleSisClient.get_relationship_description(rel) or ""
+                is_current   = LittleSisClient.relationship_is_current(rel)
+                start_date   = rel.get("start_date")
+
+                evidence = (
+                    f"LittleSis: {source_entity.get('canonical_name')} "
+                    f"{description1 or 'is related to'} "
+                    f"{target_entity.get('canonical_name')}"
+                )
+                if not is_current:
+                    evidence += " (historical)"
+
+                rb.add(
+                    source_entity=source_entity,
+                    target_entity=target_entity,
+                    rel_type=osint_type,
+                    evidence_snippet=evidence[:500],
+                    source_url=ls_url,
+                    source_quality="secondary",
+                    confidence="medium" if is_current else "low",
+                    run_id=run_id,
+                    valid_from=start_date,
+                )
+                edges_added += 1
+
+        log.info(
+            "relationship_agent: LittleSis extraction added %d candidate edges "
+            "(%d entities had LittleSis data)",
+            edges_added, len(ls_id_to_entity),
+        )
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Phase 11.3 — 2-hop WORKS_UNDER inference
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _infer_works_under(
+        self,
+        entities: list[dict[str, Any]],
+        rb: _RelBuilder,
+        run_id: str,
+    ) -> None:
+        """
+        Infer WORKS_UNDER(person → officer/director) edges via 2-hop chain:
+
+            Person A --EMPLOYED_BY--> Company X --SITS_ON_BOARD_OF (reverse)--> Person B
+
+        Semantics: if A works for X, and B sits on X's board, then A works under B's oversight.
+
+        This is a structural inference — it is always labeled is_inferred=True and receives
+        a confidence penalty from _relationship_strength_v2() with a minimum floor of 0.35.
+        The inference is only emitted when BOTH:
+          1. An EMPLOYED_BY edge A→X is in the current draft
+          2. A SITS_ON_BOARD_OF edge B→X is also in the draft
+
+        Why operating on rb.draft (not the DB):
+            Draft edges are drawn from enriched_entities in the same run. Using the draft
+            avoids cross-run pollution and is consistent with how board_interlock edges work.
+
+        Limitations:
+            - Only sees edges built in this run — does not query historical edges from DB.
+            - Does not infer WORKS_UNDER for FORMERLY_EMPLOYED_BY (historical employment).
+            - Person-to-person only: both source and target must have entity_type in
+              PERSON_TYPES to avoid inferring officer-of-officer chains through corporate
+              holding structures.
+        """
+        _PERSON_TYPES = {
+            "person", "executive_hnw", "hnwi",
+            "politician", "community_leader",
+        }
+
+        # Build entity_id → entity dict for fast lookup
+        entity_map: dict[str, dict[str, Any]] = {
+            e.get("entity_id", ""): e
+            for e in entities
+            if e.get("entity_id")
+        }
+
+        # Build two indices from the current draft edges
+        # employed_by[employee_id] = set of company_ids they EMPLOYED_BY
+        # board_members[company_id] = set of person_ids that SITS_ON_BOARD_OF that company
+        employed_by:  dict[str, set[str]] = {}
+        board_members: dict[str, set[str]] = {}
+
+        for edge in rb.draft:
+            rel_type   = edge.get("relationship_type", "")
+            source_id  = edge.get("source_entity_id", "")
+            target_id  = edge.get("target_entity_id", "")
+
+            if rel_type == "EMPLOYED_BY":
+                employed_by.setdefault(source_id, set()).add(target_id)
+            elif rel_type == "SITS_ON_BOARD_OF":
+                board_members.setdefault(target_id, set()).add(source_id)
+
+        if not employed_by or not board_members:
+            return
+
+        inferred_count = 0
+        for employee_id, company_ids in employed_by.items():
+            employee = entity_map.get(employee_id)
+            if not employee:
+                continue
+            if employee.get("entity_type", "") not in _PERSON_TYPES:
+                continue
+
+            for company_id in company_ids:
+                officers = board_members.get(company_id, set())
+                company  = entity_map.get(company_id)
+                company_name = (
+                    (company.get("canonical_name") or company.get("name") or "")
+                    if company else ""
+                )
+
+                for officer_id in officers:
+                    if officer_id == employee_id:
+                        continue
+                    officer = entity_map.get(officer_id)
+                    if not officer:
+                        continue
+                    if officer.get("entity_type", "") not in _PERSON_TYPES:
+                        continue
+
+                    snippet = (
+                        f"{employee.get('canonical_name', employee_id)} is employed by "
+                        f"{company_name or company_id}, where "
+                        f"{officer.get('canonical_name', officer_id)} sits on the board "
+                        f"(inferred WORKS_UNDER chain via EMPLOYED_BY + SITS_ON_BOARD_OF)"
+                    )
+
+                    rb.add(
+                        source_entity=employee,
+                        target_entity=officer,
+                        rel_type="WORKS_UNDER",
+                        evidence_snippet=snippet,
+                        source_url="",            # no external URL — inferred chain
+                        source_quality="tertiary",
+                        confidence="low",         # inferred — always low string tier
+                        run_id=run_id,
+                        is_inferred=True,
+                        sensitive_claim=False,
+                    )
+                    inferred_count += 1
+
+        if inferred_count:
+            log.info(
+                "relationship_agent: _infer_works_under emitted %d WORKS_UNDER edges",
+                inferred_count,
+            )
+
+    # ─────────────────────────────────────────────────────────────────────────
     # LLM inference pass
     # ─────────────────────────────────────────────────────────────────────────
 
@@ -918,11 +2111,13 @@ class RelationshipAgent(BaseAgent):
         Strategy: group community_leader and politician entities (most likely
         to have co-mention signals) into batches of 10, call LLM once per batch.
         """
-        # Only run for community_leader and politician entities
+        # Run LLM inference for all entity types that have a canonical name.
+        # Previously restricted to community_leader/politician + bio — too narrow:
+        # most entities lack description/bio in category_fields after collection,
+        # causing LLM inference to skip entirely and produce 0 relationships.
         target_entities = [
             e for e in entities
-            if e.get("entity_type") in ("community_leader", "politician")
-            and (e.get("description") or e.get("category_fields", {}).get("bio"))
+            if e.get("canonical_name")
         ]
 
         if not target_entities:
@@ -1032,6 +2227,13 @@ class RelationshipAgent(BaseAgent):
 
             # Evidence record
             source_entity_id = edge.get("source_entity_id")
+            is_inferred = edge.get("is_inferred", False)
+
+            # Inferred edges (WORKS_UNDER chains) have no external URL.
+            # Use internal sentinel URL so the evidence record is still written.
+            if is_inferred and not source_url:
+                source_url = "internal://inferred"
+
             if not source_entity_id or not source_url:
                 edge["_rejection_reason"] = "missing_evidence_source"
                 rejected.append(edge)
@@ -1044,9 +2246,9 @@ class RelationshipAgent(BaseAgent):
                     "run_id":          run_id,
                     "supported_field": f"relationship_{edge['relationship_type'].lower()}",
                     "source_url":      source_url,
-                    "source_type":     "structured_data",
+                    "source_type":     "internal_database" if is_inferred else "structured_data",
                     "evidence_snippet": evidence_snip,
-                    "claim_type":      "direct_statement",
+                    "claim_type":      "inferred" if is_inferred else "direct_statement",
                     "confidence":      edge.get("confidence", "medium"),
                     "agent_name":      self.AGENT_NAME,
                     "prompt_version":  self.AGENT_VERSION,

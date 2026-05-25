@@ -639,6 +639,25 @@ class VerificationAgent(BaseAgent):
             if result.get("hard_fail"):
                 claim_text += " Entity flagged for human review (high-confidence fail)."
 
+            # Derive an overall confidence level from the per-claim confidence values.
+            # The schema requires one of ('high', 'medium', 'low') — verdicts like
+            # 'pass', 'fail', 'unverifiable' are NOT valid and cause constraint violations.
+            claims = result.get("claims_verified", [])
+            claim_conf_values = [
+                c.get("confidence")
+                for c in claims
+                if c.get("confidence") in ("high", "medium", "low")
+            ]
+            if not claim_conf_values or overall_verdict == "unverifiable":
+                # No evidence to assess, or explicitly unverifiable → minimum confidence
+                overall_confidence: str = "low"
+            elif all(c == "high" for c in claim_conf_values):
+                overall_confidence = "high"
+            elif any(c == "low" for c in claim_conf_values):
+                overall_confidence = "low"
+            else:
+                overall_confidence = "medium"
+
             assessment = {
                 "run_id":            state["run_id"],
                 "entity_id":         eid,
@@ -655,7 +674,7 @@ class VerificationAgent(BaseAgent):
                 "framework_version": self.AGENT_VERSION,
                 "model_used":        settings.ollama_default_model,
                 "prompt_version":    self.AGENT_VERSION,
-                "confidence":        overall_verdict,   # reuse verdict as confidence label
+                "confidence":        overall_confidence,
                 "needs_review":      result.get("hard_fail", False),
                 "created_at":        datetime.now(timezone.utc).isoformat(),
             }

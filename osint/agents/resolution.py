@@ -605,12 +605,23 @@ class ResolutionAgent(BaseAgent):
         # ── Write auto-merge decisions to DB as assessments ───────────────────
         for decision in all_decisions:
             try:
+                entity_a = decision.get("entity_a_name", decision.get("entity_a_id", "?"))
+                entity_b = decision.get("entity_b_name", decision.get("entity_b_id", "?"))
+                action   = decision.get("action", "unknown")
+                score    = decision.get("similarity", decision.get("score", 0))
                 await self.write_assessment({
-                    "run_id":           run_id,
-                    "agent_name":       self.AGENT_NAME,
-                    "assessment_type":  "entity_resolution_decision",
-                    "content":          decision,
-                    "created_at":       self.now_iso(),
+                    "run_id":            run_id,
+                    "assessment_type":   "entity_resolution_decision",
+                    "claim_text":        f"Resolution: {action} — '{entity_a}' and '{entity_b}' (score={score:.3f})",
+                    "claim_json":        decision,
+                    "framework_name":    "entity_resolution_v1",
+                    "framework_version": self.AGENT_VERSION,
+                    "derived_from":      [],
+                    "model_used":        decision.get("model_used", "none"),
+                    "prompt_version":    self.AGENT_VERSION,
+                    "confidence":        "high" if score >= 0.85 else "medium",
+                    "needs_review":      False,
+                    "is_current":        True,
                 })
             except Exception as exc:
                 log.warning("resolution_agent: failed to write merge decision assessment: %s", exc)
@@ -936,11 +947,25 @@ class ResolutionAgent(BaseAgent):
         )
 
         try:
-            result, _meta = await self.llm_generate_json(
-                task_type="entity_resolution_arbitration",
-                prompt=prompt,
-                system=ARBITRATION_SYSTEM_PROMPT,
+            result, _meta = await asyncio.wait_for(
+                self.llm_generate_json(
+                    task_type="entity_resolution_arbitration",
+                    prompt=prompt,
+                    system=ARBITRATION_SYSTEM_PROMPT,
+                ),
+                timeout=90.0,  # Hard cap: 90s per arbitration call.
+                # Default path is 3 × 180s retries = 540s — far too long
+                # when there are many ambiguous pairs. Arbitration is advisory
+                # only (human reviews anyway), so a graceful {} on timeout
+                # is acceptable.
             )
+        except asyncio.TimeoutError:
+            log.warning(
+                "resolution_agent: arbitration timed out (>90s) for '%s' vs '%s' — "
+                "treating as non-match (human review required)",
+                _get_name(entity_a), _get_name(entity_b),
+            )
+            return {}
         except Exception as exc:
             log.warning(
                 "resolution_agent: LLM arbitration failed for '%s' vs '%s': %s",

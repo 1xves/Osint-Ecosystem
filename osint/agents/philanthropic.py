@@ -213,7 +213,8 @@ class PhilanthropicAgent(BaseAgent):
                 continue
 
             # Filter out orgs that aren't foundation-type
-            ntee_code = org.get("ntee_code", "") or ""
+            # ProPublica returns ntee_code as a string ("T20") but guard against int
+            ntee_code = str(org.get("ntee_code") or "")
             subtype = NTEE_SUBTYPE_MAP.get(ntee_code[:3], None)
             if not subtype:
                 # Infer from name if NTEE doesn't match
@@ -228,10 +229,14 @@ class PhilanthropicAgent(BaseAgent):
                     # Skip if we can't determine philanthropic nature
                     continue
 
-            ein = org.get("ein", "")
-            source_url = f"https://projects.propublica.org/nonprofits/organizations/{str(ein).replace('-', '')}" if ein else ""
-            revenue = org.get("income_amount")
-            assets = org.get("asset_amount")
+            # ProPublica returns ein as integer — coerce to string for URL and comparisons
+            ein = str(org.get("ein") or "")
+            source_url = f"https://projects.propublica.org/nonprofits/organizations/{ein.replace('-', '')}" if ein else ""
+            # Revenue/assets may be int or string depending on API version
+            revenue_raw = org.get("income_amount")
+            revenue = int(revenue_raw) if revenue_raw is not None else None
+            assets_raw = org.get("asset_amount")
+            assets = int(assets_raw) if assets_raw is not None else None
 
             category_fields: dict[str, Any] = {
                 "philanthropic_subtype": subtype,
@@ -328,7 +333,7 @@ class PhilanthropicAgent(BaseAgent):
                             f"IRS 990 filing via ProPublica: {name} is a registered "
                             f"{'tax-exempt organization' if not ntee_code else f'organization (NTEE: {ntee_code})'}"
                             f"{f', EIN: {ein}' if ein else ''}"
-                            f"{f', assets: ${assets:,}' if assets else ''}"
+                            f"{f', assets: ${assets:,}' if isinstance(assets, int) else ''}"
                         ),
                         "claim_type": "direct_statement",
                         "confidence": "high",

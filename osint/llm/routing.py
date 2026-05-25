@@ -72,6 +72,14 @@ class TaskType:
     GAP_ANALYSIS                = "gap_analysis"
     DEFAULT                     = "default"
 
+    # ── Document extraction ───────────────────────────────────────────────────
+    # These task types are used by DocumentExtractor (osint/llm/extractors.py).
+    # Each maps to the appropriate model via MODEL_ROUTING in config.py.
+    DOCUMENT_EXTRACTION_PROXY  = "document_extraction_proxy"   # SEC DEF 14A / proxy statements
+    DOCUMENT_EXTRACTION_10K    = "document_extraction_10k"     # SEC 10-K annual reports
+    DOCUMENT_EXTRACTION_COURT  = "document_extraction_court"   # Court filings / dockets
+    DOCUMENT_EXTRACTION_990    = "document_extraction_990"     # IRS Form 990 XML sections
+
 
 class LLMRouter:
     """

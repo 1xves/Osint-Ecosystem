@@ -218,10 +218,12 @@ class Pass2Dispatcher(BaseAgent):
             if "agent_entity_counts" in result:
                 merged_entity_counts.update(result["agent_entity_counts"])
 
+            agent_tokens_in  = result.get("total_tokens_in",  0)
+            agent_tokens_out = result.get("total_tokens_out", 0)
             log.info(
                 "pass2_dispatcher: agent '%s' produced %d new entities "
                 "(tokens_in+=%d tokens_out+=%d)",
-                agent_name, len(new_entities), agent_delta_in, agent_delta_out,
+                agent_name, len(new_entities), agent_tokens_in, agent_tokens_out,
             )
 
         # ── Summary ───────────────────────────────────────────────────────────

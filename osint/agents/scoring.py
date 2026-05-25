@@ -407,13 +407,19 @@ class ScoringAgent(BaseAgent):
             cat = scored.setdefault("category_fields", {})
             cat["blocker_evidence"] = blocker_evidence
 
-        # ── Write scores to DB ────────────────────────────────────────────────
+        # ── Write scores and enrichment data to DB ───────────────────────────
         if entity_id:
             try:
                 await self._db.update_entity_scores(entity_id, scores, classification_flags)
+                # Persist enriched category_fields — populated during the enrichment
+                # phase (HUD properties, FinCEN CTR, CourtListener, EDGAR, etc.) but
+                # never written to Supabase for non-OFAC entities until now.
+                category_fields = scored.get("category_fields", {})
+                if category_fields:
+                    await self._db.update_entity_category_fields(entity_id, category_fields)
             except Exception as exc:
                 log.warning(
-                    "scoring_agent: DB score update failed for '%s': %s", entity_name, exc
+                    "scoring_agent: DB update failed for '%s': %s", entity_name, exc
                 )
 
         # ── Write rationale to analytical_assessments ─────────────────────────

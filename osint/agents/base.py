@@ -135,7 +135,17 @@ class BaseAgent(ABC):
 
         else:
             elapsed_ms = int((time.monotonic() - self._started_at) * 1000)
-            await self._on_success(elapsed_ms)
+            # Wrap _on_success() in try/except so a DB/Redis telemetry write
+            # failure does NOT crash the LangGraph pipeline.  The run is still
+            # valid even if we can't record the agent_output row; losing the
+            # row is far preferable to silently killing the entire graph.
+            try:
+                await self._on_success(elapsed_ms)
+            except Exception as telemetry_err:
+                agent_log.warning(
+                    "DONE but telemetry write failed (run=%s): %s — continuing pipeline",
+                    self._run_id, telemetry_err,
+                )
             agent_log.info(
                 "DONE (run=%s, entities=%d, tokens_in=%d, tokens_out=%d, elapsed=%dms)",
                 self._run_id, self._entities_produced,

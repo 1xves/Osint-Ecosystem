@@ -27,6 +27,7 @@ DATABASE_URL = os.environ["DATABASE_URL"]
 MIGRATIONS = [
     Path("migrations/001_initial_schema.sql"),
     Path("migrations/002_additions.sql"),
+    Path("migrations/003_fix_rejected_items_constraints.sql"),
 ]
 
 CREATE_TRACKING_TABLE = """

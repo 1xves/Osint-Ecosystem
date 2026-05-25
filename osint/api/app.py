@@ -6,8 +6,10 @@ FastAPI application for the OSINT Startup Ecosystem Intelligence System.
 Endpoints:
     GET  /health                         — liveness check (no auth)
     POST /runs                           — trigger a new pipeline run → 202 Accepted
+    GET  /runs                           — paginated list of runs (city_key, status filters)
     GET  /runs/{run_id}                  — get run status + aggregate stats
     GET  /runs/{run_id}/briefing         — get final briefing (JSON or markdown)
+    GET  /runs/{run_id}/relationships    — get all relationships produced by a run
     GET  /entities                       — paginated entity search
     GET  /entities/{entity_id}           — get a single entity by ID
 
@@ -368,6 +370,43 @@ async def trigger_run(request: RunCreateRequest) -> RunCreateResponse:
 
 
 @app.get(
+    "/runs",
+    tags=["runs"],
+    dependencies=[Depends(require_api_key)],
+)
+async def list_runs(
+    city_key: str | None = Query(default=None, description="Normalized city key, e.g. 'philadelphia_us'"),
+    status: str | None = Query(
+        default=None,
+        description="Filter by run status: pending|running|complete|partial|failed",
+        pattern="^(pending|running|complete|partial|failed)$",
+    ),
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    """
+    List OSINT pipeline runs, most recent first.
+
+    Query params:
+        city_key — filter by city (e.g. 'philadelphia_us')
+        status   — filter by run status
+        limit    — page size (1–100, default 20)
+        offset   — pagination offset
+
+    Returns total count + list of run summaries.
+    """
+    db: SupabaseClient = app.state.db
+    runs  = await db.list_runs(city_key=city_key, status=status, limit=limit, offset=offset)
+    total = await db.count_runs(city_key=city_key, status=status)
+    return {
+        "total":  total,
+        "limit":  limit,
+        "offset": offset,
+        "runs":   [_serialize_run(r) for r in runs],
+    }
+
+
+@app.get(
     "/runs/{run_id}",
     tags=["runs"],
     dependencies=[Depends(require_api_key)],
@@ -448,6 +487,48 @@ async def get_briefing(
         return PlainTextResponse(content=md, media_type="text/markdown")
 
     return ORJSONResponse(content=briefing)
+
+
+@app.get(
+    "/runs/{run_id}/relationships",
+    tags=["runs"],
+    dependencies=[Depends(require_api_key)],
+)
+async def get_run_relationships(
+    run_id: str,
+    verified_only: bool = Query(
+        default=False,
+        description="If true, return only relationships that passed verification",
+    ),
+) -> dict[str, Any]:
+    """
+    Return all relationships produced by a run.
+
+    Query params:
+        verified_only — return only verified=TRUE edges (default: all edges)
+
+    Returns:
+        count — total edges in this response
+        relationships — list of relationship records, each with:
+            relationship_id, source_entity_id, target_entity_id,
+            relationship_type, relationship_strength, confidence_score,
+            confidence (low/medium/high), verified, is_inferred,
+            and evidence fields
+    """
+    _validate_uuid(run_id)
+    db: SupabaseClient = app.state.db
+
+    run = await db.get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+
+    relationships = await db.get_relationships_by_run(run_id, verified_only=verified_only)
+    return {
+        "run_id":        run_id,
+        "verified_only": verified_only,
+        "count":         len(relationships),
+        "relationships": [_serialize_record(r) for r in relationships],
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -412,7 +412,7 @@ class CommunityLeaderAgent(BaseAgent):
                 response = await self._gdelt.search_articles(
                     query=query,
                     mode="artlist",
-                    maxrecords=10,
+                    max_records=10,
                     sort="HybridRel",
                 )
             except Exception as e:

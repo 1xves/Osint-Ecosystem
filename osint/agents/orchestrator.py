@@ -81,38 +81,40 @@ FRAMING_PROMPT_TEMPLATE = """Generate 4 analytical framings for the startup ecos
 Context about this ecosystem:
 {scope_summary}
 
-Generate this JSON array with exactly 4 objects, one per framing_type:
+Return a JSON object with a "framings" key containing exactly 4 framing objects, one per framing_type:
 
-[
-  {{
-    "framing_type": "mainstream",
-    "framing_label": "<short label>",
-    "framing_description": "<what lens this applies — 2-3 sentences>",
-    "entities_to_prioritize": ["<entity_type1>", "<entity_type2>"],
-    "search_angle": "<what to specifically look for under this framing>"
-  }},
-  {{
-    "framing_type": "heterodox",
-    "framing_label": "<short label>",
-    "framing_description": "<contrarian or non-obvious perspective>",
-    "entities_to_prioritize": ["<entity_type1>"],
-    "search_angle": "<what to look for>"
-  }},
-  {{
-    "framing_type": "adjacent_domain",
-    "framing_label": "<short label>",
-    "framing_description": "<a domain adjacent to tech startups that shapes this ecosystem>",
-    "entities_to_prioritize": ["<entity_type1>", "<entity_type2>"],
-    "search_angle": "<what to look for>"
-  }},
-  {{
-    "framing_type": "practitioner",
-    "framing_label": "<short label>",
-    "framing_description": "<the on-the-ground practitioner view — operators, connectors, builders>",
-    "entities_to_prioritize": ["<entity_type1>", "<entity_type2>"],
-    "search_angle": "<what to look for>"
-  }}
-]"""
+{{
+  "framings": [
+    {{
+      "framing_type": "mainstream",
+      "framing_label": "<short label>",
+      "framing_description": "<what lens this applies — 2-3 sentences>",
+      "entities_to_prioritize": ["<entity_type1>", "<entity_type2>"],
+      "search_angle": "<what to specifically look for under this framing>"
+    }},
+    {{
+      "framing_type": "heterodox",
+      "framing_label": "<short label>",
+      "framing_description": "<contrarian or non-obvious perspective>",
+      "entities_to_prioritize": ["<entity_type1>"],
+      "search_angle": "<what to look for>"
+    }},
+    {{
+      "framing_type": "adjacent_domain",
+      "framing_label": "<short label>",
+      "framing_description": "<a domain adjacent to tech startups that shapes this ecosystem>",
+      "entities_to_prioritize": ["<entity_type1>", "<entity_type2>"],
+      "search_angle": "<what to look for>"
+    }},
+    {{
+      "framing_type": "practitioner",
+      "framing_label": "<short label>",
+      "framing_description": "<the on-the-ground practitioner view — operators, connectors, builders>",
+      "entities_to_prioritize": ["<entity_type1>", "<entity_type2>"],
+      "search_angle": "<what to look for>"
+    }}
+  ]
+}}"""
 
 
 class OrchestratorAgent(BaseAgent):
@@ -257,13 +259,66 @@ class OrchestratorAgent(BaseAgent):
                 "is_current":       True,
             })
 
-        # Check we have all 4 types — log warning if not
+        # Fill in any missing framing types with generic fallbacks
+        # so the pipeline always has all 4 framings regardless of LLM output quality.
         missing_types = valid_framing_types - seen_types
         if missing_types:
             log.warning(
-                "Orchestrator: missing framing types: %s — pipeline will run with %d framings",
-                missing_types, len(framings)
+                "Orchestrator: LLM missed framing types %s — injecting generic fallbacks",
+                missing_types,
             )
+            _fallbacks: dict[str, dict[str, Any]] = {
+                "mainstream": {
+                    "framing_type": "mainstream",
+                    "framing_label": "Established Ecosystem",
+                    "framing_description": (
+                        f"The dominant narrative around {city_name}'s startup ecosystem — "
+                        "who the recognized players are, what sectors get attention, "
+                        "and where institutional capital flows."
+                    ),
+                    "entities_to_prioritize": ["investor", "corporate", "executive_hnw"],
+                    "search_angle": f"Top investors, accelerators, and tech companies in {city_name}",
+                },
+                "heterodox": {
+                    "framing_type": "heterodox",
+                    "framing_label": "Hidden Influence",
+                    "framing_description": (
+                        f"Non-obvious power brokers and contrarian forces shaping {city_name}'s "
+                        "ecosystem — political connections, regulatory leverage, and actors "
+                        "not typically covered in tech press."
+                    ),
+                    "entities_to_prioritize": ["political", "politician", "illicit"],
+                    "search_angle": f"Political donors, lobbyists, and regulatory actors in {city_name}",
+                },
+                "adjacent_domain": {
+                    "framing_type": "adjacent_domain",
+                    "framing_label": "Adjacent Sectors",
+                    "framing_description": (
+                        f"Domains adjacent to tech that shape {city_name}'s ecosystem — "
+                        "real estate, healthcare, education, manufacturing, and logistics "
+                        "interests that intersect with startup activity."
+                    ),
+                    "entities_to_prioritize": ["corporate", "nonprofit", "philanthropic"],
+                    "search_angle": f"Healthcare, real estate, and education institutions in {city_name}",
+                },
+                "practitioner": {
+                    "framing_type": "practitioner",
+                    "framing_label": "Operators & Builders",
+                    "framing_description": (
+                        f"The on-the-ground view of {city_name}'s ecosystem — founders, "
+                        "operators, community organizers, and connectors who are building "
+                        "rather than just funding."
+                    ),
+                    "entities_to_prioritize": ["executive_hnw", "community_leader", "hnwi"],
+                    "search_angle": f"Founders, operators, and community leaders in {city_name}",
+                },
+            }
+            for missing in missing_types:
+                fallback = _fallbacks[missing].copy()
+                fallback["city_name"]  = city_name
+                fallback["run_id"]     = run_id
+                fallback["generated_at"] = self.now_iso()
+                framings.append(fallback)
 
         log.info("Orchestrator: %d framings generated", len(framings))
 

@@ -48,6 +48,7 @@ class OSINTRunState(TypedDict, total=False):
     city_name: str                       # e.g., "Austin"
     country_or_region: str              # e.g., "United States"
     city_key: str                        # Normalized: "austin_us"
+    state_abbr: str                      # Two-letter US state abbreviation, e.g., "TX", "PA"
     operator_id: str                     # user_id who triggered this run
     triggered_at: str                    # ISO8601 timestamp
 
@@ -97,6 +98,9 @@ class OSINTRunState(TypedDict, total=False):
     enrichment_targets: list[str]               # entity_ids selected for enrichment
     enriched_entities: list[dict[str, Any]]     # Post-enrichment canonical set
 
+    # ─── Phase 2.5 Output: Deduplication (dedup_agent) ────────────────────────
+    dedup_merges: list[dict[str, Any]]          # Audit log: {primary_id, merged_ids, bucket, …}
+
     # ─── Phase 3 Output: Analytical ───────────────────────────────────────────
     relationships_draft: list[dict[str, Any]]   # Edge list pre-verification
     relationships_verified: list[dict[str, Any]] # Edge list post-verification
@@ -132,13 +136,56 @@ def initial_state(
     country_or_region: str,
     operator_id: str,
     triggered_at: str,
+    state_abbr: str = "",
 ) -> OSINTRunState:
     """
     Returns a fully initialized OSINTRunState with all fields set to
     their correct empty/default values. Pass this to the LangGraph
     graph when starting a new run.
     """
-    city_key = f"{city_name.lower().replace(' ', '_')}_{country_or_region[:2].lower()}"
+    # Extract 2-letter country code from full country name.
+    # Explicit lookup handles multi-word names ("United States" → "us").
+    # Falls back to first 2 chars of first word for single-word countries.
+    _COUNTRY_CODE_MAP: dict[str, str] = {
+        "united states": "us", "united kingdom": "uk", "united arab emirates": "ae",
+        "south korea": "kr",   "new zealand": "nz",    "south africa": "za",
+        "canada": "ca",        "australia": "au",       "germany": "de",
+        "france": "fr",        "japan": "jp",           "china": "cn",
+        "india": "in",         "brazil": "br",          "mexico": "mx",
+        "singapore": "sg",     "israel": "il",          "sweden": "se",
+        "netherlands": "nl",   "switzerland": "ch",     "spain": "es",
+        "italy": "it",         "portugal": "pt",        "denmark": "dk",
+        "finland": "fi",       "norway": "no",          "austria": "at",
+        "belgium": "be",       "ireland": "ie",         "poland": "pl",
+    }
+    _country_key  = country_or_region.strip().lower()
+    _country_code = _COUNTRY_CODE_MAP.get(_country_key, _country_key[:2])
+    city_key = f"{city_name.lower().replace(' ', '_')}_{_country_code}"
+
+    # Auto-detect US state from major city names if state_abbr not provided
+    if not state_abbr and _country_code == "us":
+        _CITY_STATE_MAP: dict[str, str] = {
+            "philadelphia": "PA", "pittsburgh": "PA", "allentown": "PA",
+            "new york": "NY", "new york city": "NY", "nyc": "NY", "brooklyn": "NY",
+            "los angeles": "CA", "san francisco": "CA", "san jose": "CA",
+            "san diego": "CA", "oakland": "CA", "sacramento": "CA",
+            "chicago": "IL",    "houston": "TX",   "dallas": "TX",
+            "austin": "TX",     "san antonio": "TX",
+            "phoenix": "AZ",    "seattle": "WA",   "denver": "CO",
+            "boston": "MA",     "atlanta": "GA",   "miami": "FL",
+            "orlando": "FL",    "tampa": "FL",     "minneapolis": "MN",
+            "detroit": "MI",    "columbus": "OH",  "cleveland": "OH",
+            "portland": "OR",   "las vegas": "NV", "nashville": "TN",
+            "memphis": "TN",    "baltimore": "MD", "washington": "DC",
+            "dc": "DC",         "charlotte": "NC", "raleigh": "NC",
+            "indianapolis": "IN", "louisville": "KY", "kansas city": "MO",
+            "st. louis": "MO",  "salt lake city": "UT", "richmond": "VA",
+            "virginia beach": "VA", "new orleans": "LA", "baton rouge": "LA",
+            "oklahoma city": "OK", "albuquerque": "NM", "tucson": "AZ",
+            "milwaukee": "WI",  "buffalo": "NY",   "hartford": "CT",
+            "new haven": "CT",  "providence": "RI",
+        }
+        state_abbr = _CITY_STATE_MAP.get(city_name.strip().lower(), "")
 
     return OSINTRunState(
         # Identity
@@ -146,6 +193,7 @@ def initial_state(
         city_name=city_name,
         country_or_region=country_or_region,
         city_key=city_key,
+        state_abbr=state_abbr,
         operator_id=operator_id,
         triggered_at=triggered_at,
 
@@ -182,6 +230,9 @@ def initial_state(
         # Enrichment
         enrichment_targets=[],
         enriched_entities=[],
+
+        # Deduplication
+        dedup_merges=[],
 
         # Analytical
         relationships_draft=[],

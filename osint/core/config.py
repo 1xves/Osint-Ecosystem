@@ -62,6 +62,8 @@ class Settings(BaseSettings):
     mediastack_api_key: str = ""
     fec_api_key: str = ""
     courtlistener_api_key: str = ""
+    followthemoney_api_key: str = ""    # Optional — unauthenticated allowed at lower rate
+    opencorporates_api_key: str = ""    # Optional — increases rate limit
 
     # ─── Research Pipeline ────────────────────────────────────────────────────
     research_pipeline_url: str = "http://localhost:5050"
@@ -158,9 +160,58 @@ RATE_LIMITS: dict[str, dict] = {
     },
     "ofac": {
         "requests_per_minute": 60,
-        "retry_backoff_seconds": [2, 5],
+        "retry_backoff_seconds": [],        # Fail fast — no retries on DNS/connectivity errors
         "cache_ttl_seconds": 86400,         # 1 day — sanctions list updates daily
     },
+    "littlesis": {
+        "requests_per_minute": 30,          # Conservative — undocumented limit; API is rate-sensitive
+        "retry_backoff_seconds": [2, 5, 15],
+        "cache_ttl_seconds": 604800,        # 7 days — power network data is stable
+    },
+    "followthemoney": {
+        "requests_per_minute": 30,          # Unauthenticated limit; 100/min with API key
+        "retry_backoff_seconds": [2, 5, 15],
+        "cache_ttl_seconds": 86400,         # 1 day — state campaign finance updates frequently
+    },
+    "icij": {
+        "requests_per_minute": 20,          # Undocumented limit; be conservative
+        "retry_backoff_seconds": [3, 10, 30],
+        "cache_ttl_seconds": 2592000,       # 30 days — ICIJ data is from leaked docs, stable
+    },
+    "wayback": {
+        "requests_per_minute": 10,          # Conservative — IA requests politeness
+        "retry_backoff_seconds": [2, 5],
+        "cache_ttl_seconds": 86400,         # 1 day — snapshots don't change
+    },
+    "patent_view": {
+        "requests_per_minute": 45,          # USPTO PatentsView published limit
+        "retry_backoff_seconds": [2, 5, 15],
+        "cache_ttl_seconds": 2592000,       # 30 days — patent records are stable
+    },
+    "eventbrite": {
+        "requests_per_minute": 60,
+        "retry_backoff_seconds": [2, 5, 15],
+        "cache_ttl_seconds": 3600,          # 1 hour — events change frequently
+    },
+    "meetup": {
+        "requests_per_minute": 30,
+        "retry_backoff_seconds": [2, 5, 15],
+        "cache_ttl_seconds": 3600,
+    },
+    "bizapedia": {
+        "requests_per_minute": 20,          # 1 req/3s — conservative to avoid blocks
+        "retry_backoff_seconds": [5, 15, 60],
+        "cache_ttl_seconds": 604800,        # 7 days — corporate records are stable
+    },
+    "sos_us": {
+        "requests_per_minute": 24,          # ~2 req/5s per SoS domain
+        "retry_backoff_seconds": [5, 15, 60],
+        "cache_ttl_seconds": 604800,
+    },
+    # Form D uses the "sec_edgar" domain (shared with EdgarClient — same EDGAR servers)
+    # Rate limit for XML fetches is enforced by _XML_FETCH_SEMAPHORE in form_d.py,
+    # not by RateLimiter, because the XML responses cannot go through RateLimiter.get()
+    # (which calls resp.json() and would fail on non-JSON content).
 }
 
 
@@ -270,6 +321,13 @@ MODEL_ROUTING: dict[str, str] = {
     # Gap analysis
     "gap_analysis": settings.ollama_default_model,
 
+    # Document extraction — semi-structured text from PDFs/HTML
+    # All use the default model (qwen3:14b) — these require reasoning over dense text.
+    "document_extraction_proxy": settings.ollama_default_model,  # DEF 14A proxy statements
+    "document_extraction_10k":   settings.ollama_default_model,  # 10-K annual reports
+    "document_extraction_court": settings.ollama_default_model,  # Court filings / dockets
+    "document_extraction_990":   settings.ollama_default_model,  # IRS Form 990 XML sections
+
     # Default fallback
     "default": settings.ollama_default_model,
 }
@@ -285,6 +343,7 @@ MODEL_PARAMS: dict[str, dict] = {
         "top_p": 0.9,
         "top_k": 40,
         "repeat_penalty": 1.1,
+        "num_ctx": 16384,   # context window (input + output); Ollama default is 4096 — far too small
         "num_predict": 4096,
     },
     "qwen3:14b": {
@@ -292,6 +351,7 @@ MODEL_PARAMS: dict[str, dict] = {
         "top_p": 0.9,
         "top_k": 40,
         "repeat_penalty": 1.1,
+        "num_ctx": 16384,   # 4096 default gets consumed by prompt alone on complex city analysis
         "num_predict": 8192,
     },
     "qwen3:22b": {
@@ -299,6 +359,7 @@ MODEL_PARAMS: dict[str, dict] = {
         "top_p": 0.9,
         "top_k": 50,
         "repeat_penalty": 1.1,
+        "num_ctx": 32768,
         "num_predict": 16384,
     },
     "nomic-embed-text": {

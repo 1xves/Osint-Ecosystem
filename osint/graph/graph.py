@@ -74,6 +74,7 @@ from osint.agents.pipeline import PipelineAgent
 from osint.agents.gap_analysis import GapAnalysisAgent
 from osint.agents.resolution import ResolutionAgent
 from osint.agents.enrichment import EnrichmentAgent
+from osint.agents.dedup import DedupAgent
 from osint.agents.relationship import RelationshipAgent
 from osint.agents.scoring import ScoringAgent
 from osint.agents.verification import VerificationAgent
@@ -229,6 +230,7 @@ def build_graph(
 
     resolution_agent = ResolutionAgent(*deps)
     enrichment_agent      = EnrichmentAgent(*deps)
+    dedup_agent           = DedupAgent(*deps)
     relationship_agent    = RelationshipAgent(*deps)
     scoring_agent         = ScoringAgent(*deps)
     verification_agent    = VerificationAgent(*deps)
@@ -255,6 +257,7 @@ def build_graph(
     graph.add_node("pass2_dispatcher",      pass2_dispatcher)
     graph.add_node("resolution_agent",      resolution_agent)
     graph.add_node("enrichment_agent",      enrichment_agent)
+    graph.add_node("dedup_agent",           dedup_agent)
     graph.add_node("relationship_agent",    relationship_agent)
     graph.add_node("scoring_agent",         scoring_agent)
     graph.add_node("verification_agent",    verification_agent)
@@ -303,7 +306,8 @@ def build_graph(
 
     # ── Analytical pipeline (sequential) ─────────────────────────────────────
     graph.add_edge("resolution_agent",  "enrichment_agent")
-    graph.add_edge("enrichment_agent",  "relationship_agent")
+    graph.add_edge("enrichment_agent",  "dedup_agent")
+    graph.add_edge("dedup_agent",       "relationship_agent")
     graph.add_edge("relationship_agent", "scoring_agent")
     graph.add_edge("scoring_agent",     "verification_agent")
     graph.add_edge("verification_agent", "briefing_agent")
