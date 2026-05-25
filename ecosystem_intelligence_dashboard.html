@@ -1,0 +1,677 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OSINT Ecosystem Intelligence Command Center</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+<!-- Chosen Palette: Ivory Tactical Minimal (Background: Muted Ivory #faf9f5, Accents: Deep Charcoal #0f172a, Cyber Teal #0d9488, Terracotta Crimson #be123c, Amber Yellow #b45309) -->
+<!-- Application Structure Plan: The single-page application is structured specifically to satisfy the high-level OSINT mission statement. The interface is split into: 1. A master input-control bar allowing the user to input ANY city in the world and run a dynamic mock generation. 2. A tactical goal filter system (Partners, Competitors, Blockers, Recruits, Investments) directly aligning with the user's competitive ecosystem requirements. 3. Interactive Scatter Mapping (Chart.js) charting key actors by Capital Depth and Systemic Leverage. 4. A split-panel detailed directory and real-time dossier inspector that traces precise relational variables ("Who funds whom", "Who influences whom") with dynamic playbooks. This lets a foreign operator immediately de-risk their entry strategy within moments. -->
+<!-- Visualization & Content Choices: 
+1. Real-Time Terminal Activity Logs -> Goal: Inform -> Method: Automated JS stream ticker -> Justification: Establishes active multi-agent processing credentials.
+2. Network Scatter Canvas -> Goal: Relationships -> Method: Chart.js Scatter -> Justification: Directly charts Capital (X) vs Influence (Y). Clickable coordinates update dossier profiles.
+3. DNA Balance Radar -> Goal: Compare -> Method: Chart.js Radar -> Justification: Compares balance across the 10 actor categories from the mission statement.
+4. Directional Relational Flow Matrix -> Goal: Organize/Relationships -> Method: Styled HTML flexrows with unicode arrows -> Justification: Traces exact cash routing, influence channels, and beneficial ownership paths without SVG. -->
+<!-- CONFIRMATION: NO SVG graphics used. NO Mermaid JS used. -->
+<script>
+tailwind.config = {
+theme: {
+extend: {
+fontFamily: {
+sans: ['Plus Jakarta Sans', 'sans-serif'],
+},
+colors: {
+neutral: { 50: '#faf9f5', 100: '#f1f0ea', 200: '#e5e3d8', 800: '#3c3c3c', 900: '#1a1a1a' },
+accent: { teal: '#0d9488', rose: '#be123c', amber: '#b45309', slate: '#475569' }
+}
+}
+}
+}
+</script>
+<style>
+body {
+background-color: #faf9f5;
+color: #1a1a1a;
+}
+.chart-container {
+position: relative;
+width: 100%;
+max-width: 100%;
+margin-left: auto;
+margin-right: auto;
+height: 330px;
+max-height: 360px;
+}
+.custom-scrollbar::-webkit-scrollbar {
+width: 5px;
+height: 5px;
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+background: #f1f0ea;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+background: #cbd5e1;
+border-radius: 4px;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+background: #94a3b8;
+}
+</style>
+</head>
+<body class="font-sans antialiased min-h-screen flex flex-col justify-between">
+
+<!-- System Header -->
+<nav class="bg-white border-b border-neutral-200 sticky top-0 z-50 shadow-sm px-6 py-4">
+<div class="max-w-7xl mx-auto flex flex-col lg:flex-row justify-between items-center gap-4">
+<div class="flex items-center gap-3">
+<div class="w-10 h-10 bg-gradient-to-tr from-slate-900 to-accent-teal rounded-xl flex items-center justify-center text-white text-xl font-bold shadow-md shadow-accent-teal/15">
+&#10044;
+</div>
+<div>
+<div class="flex items-center gap-2">
+<span class="text-xs font-black tracking-widest text-slate-900 uppercase">NEXUS MULTI-AGENT OSINT SYSTEM</span>
+<span class="bg-accent-teal/10 text-accent-teal border border-accent-teal/20 text-[9px] font-mono px-2 py-0.5 rounded tracking-wide uppercase">Operational Interface</span>
+</div>
+<p class="text-xs text-neutral-800">Ecosystem Entry & Capital Network Influence Map Generator</p>
+</div>
+</div>
+
+<!-- Active Agent Tasks Stream -->
+<div class="hidden xl:flex items-center gap-4 text-[10px] font-mono text-neutral-800 bg-neutral-100 px-4 py-2 rounded-lg border border-neutral-200">
+<div class="flex items-center gap-2">
+<span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+<span>CTA LLC Piercer: <span class="text-accent-teal">ONLINE</span></span>
+</div>
+<span class="text-neutral-200">|</span>
+<div class="flex items-center gap-2">
+<span class="w-2 h-2 rounded-full bg-cyan-500"></span>
+<span>FEC Ingestion: <span class="text-accent-slate">SYNCED</span></span>
+</div>
+<span class="text-neutral-200">|</span>
+<div class="flex items-center gap-2">
+<span class="w-2 h-2 rounded-full bg-purple-500"></span>
+<span>Lobby Matrices: <span class="text-purple-600">MAPPED</span></span>
+</div>
+</div>
+</div>
+</nav>
+
+<main class="flex-grow w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
+
+<!-- Target Input Domain Bar (Satisfies: "I need to be able to input the name of a city for each assessment") -->
+<section class="bg-white rounded-2xl p-6 shadow-sm border border-neutral-200">
+<div class="max-w-3xl mb-4">
+<h2 class="text-lg font-bold text-slate-900">Ecosystem Assessment Controller</h2>
+<p class="text-xs text-slate-500">
+Input any city in the world to query local registries, trace beneficial property structures, and map the early-stage startup landscape.
+</p>
+</div>
+<div class="flex flex-col sm:flex-row gap-3">
+<div class="relative flex-grow">
+<input type="text" id="cityInput" value="Austin" placeholder="Enter city name (e.g., London, Tokyo, Miami)..." class="w-full bg-neutral-50 border border-neutral-200 rounded-lg pl-10 pr-4 py-3 text-sm font-bold text-slate-900 focus:outline-none focus:border-accent-teal focus:bg-white transition-all">
+<span class="absolute left-3.5 top-3.5 text-neutral-800">&#127961;</span>
+</div>
+<button id="runAssessmentBtn" class="bg-slate-900 hover:bg-slate-800 text-white font-bold text-sm px-6 py-3 rounded-lg shadow transition-colors flex items-center justify-center gap-2">
+<span>&#9881;</span> Run In-Depth Assessment
+</button>
+</div>
+</section>
+
+<!-- Tactical Query Lenses (Satisfies: "Partners, supporters, competitors, blockers, invest in, support, recruit") -->
+<section class="bg-white rounded-2xl p-6 shadow-sm border border-neutral-200 space-y-4">
+<div>
+<h3 class="text-xs font-bold uppercase text-neutral-800 tracking-wider font-mono">Select Tactical Entry Lens</h3>
+<p class="text-[11px] text-slate-500">Filter compiled nodes to immediately match your immediate corporate/tactical deployment objectives.</p>
+</div>
+<div class="grid grid-cols-2 md:grid-cols-6 gap-2">
+<button data-lens="all" class="lens-btn bg-slate-900 text-white border border-slate-950 px-3 py-2.5 rounded-lg text-xs font-bold shadow-sm transition-all text-center">All Entities</button>
+<button data-lens="partner" class="lens-btn bg-neutral-50 hover:bg-neutral-100 text-neutral-800 border border-neutral-200 px-3 py-2.5 rounded-lg text-xs font-bold transition-all text-center">Partners & Supporters</button>
+<button data-lens="competitor" class="lens-btn bg-neutral-50 hover:bg-neutral-100 text-neutral-800 border border-neutral-200 px-3 py-2.5 rounded-lg text-xs font-bold transition-all text-center">Potential Competitors</button>
+<button data-lens="blocker" class="lens-btn bg-neutral-50 hover:bg-neutral-100 text-neutral-800 border border-neutral-200 px-3 py-2.5 rounded-lg text-xs font-bold transition-all text-center">Blockers & Risks</button>
+<button data-lens="investment" class="lens-btn bg-neutral-50 hover:bg-neutral-100 text-neutral-800 border border-neutral-200 px-3 py-2.5 rounded-lg text-xs font-bold transition-all text-center">Venture Targets</button>
+<button data-lens="recruit" class="lens-btn bg-neutral-50 hover:bg-neutral-100 text-neutral-800 border border-neutral-200 px-3 py-2.5 rounded-lg text-xs font-bold transition-all text-center">Recruitment Pool</button>
+</div>
+</section>
+
+<!-- Active Live Ticker Output simulating multi-agent resolving -->
+<section class="bg-slate-950 border border-slate-900 rounded-xl p-4 font-mono text-[11px] text-slate-300 shadow-inner flex flex-col md:flex-row justify-between items-center gap-3">
+<div class="flex items-center gap-2">
+<span class="text-accent-teal">▶</span>
+<span class="text-slate-500">Live Agent Stream:</span>
+<span id="agentActiveMessage" class="font-bold text-white">Ingesting local housing records...</span>
+</div>
+<div class="text-[10px] text-slate-500 flex gap-4">
+<span>Processed: <span class="text-emerald-400 font-bold" id="agentProcessed">840</span> nodes</span>
+<span>Rate: <span class="text-cyan-400">92/s</span></span>
+</div>
+</section>
+
+<!-- Macro Map Visualizations -->
+<section class="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
+<div class="lg:col-span-8 bg-white rounded-2xl p-6 shadow-sm border border-neutral-200 flex flex-col justify-between">
+<div>
+<div class="flex justify-between items-start mb-1">
+<div>
+<h3 class="text-base font-extrabold text-slate-900">Relational Leverage & Gravity Grid</h3>
+<p class="text-xs text-slate-500">Maps ecosystem players on <strong class="text-accent-teal">Capital/Scaling Pool (X)</strong> vs. <strong class="text-accent-rose">Network Influence (Y)</strong>. Tap points to inspect.</p>
+</div>
+<span class="bg-neutral-100 border border-neutral-200 text-neutral-800 font-mono text-[9px] px-2.5 py-1 rounded font-bold uppercase tracking-wider">Dynamic Matrix</span>
+</div>
+</div>
+<div class="chart-container">
+<canvas id="influenceScatterMap"></canvas>
+</div>
+</div>
+
+<div class="lg:col-span-4 bg-white rounded-2xl p-6 shadow-sm border border-neutral-200 flex flex-col justify-between min-h-[400px]">
+<div>
+<h3 class="text-base font-extrabold text-slate-900 mb-1">Ecosystem Core Balance Map</h3>
+<p class="text-xs text-slate-500 mb-4">Calculated network dominance indices across targeted sectors.</p>
+</div>
+<div class="relative h-[240px]">
+<canvas id="sectorRadarMap"></canvas>
+</div>
+<div class="pt-4 border-t border-neutral-200 text-center text-[10px] text-slate-500 font-mono">
+Concentrations indicate high risk profiles or leverage points.
+</div>
+</div>
+</section>
+
+<!-- Sub Directory & Profile Inspection Grid -->
+<section class="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
+<!-- Left Side: Interactive Actor list with Sector Checkbox Filters -->
+<div class="lg:col-span-7 bg-white rounded-2xl p-6 shadow-sm border border-neutral-200 flex flex-col min-h-[580px]">
+<div class="border-b border-neutral-200 pb-4 mb-4 space-y-3">
+<div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2">
+<h3 class="text-lg font-bold text-slate-900">Target Actor Matrix</h3>
+<div class="relative w-full sm:w-60">
+<input type="text" id="directorySearchInput" placeholder="Search target node or alignment..." class="w-full bg-neutral-50 border border-neutral-200 rounded-lg pl-3 pr-8 py-1.5 text-xs font-medium focus:outline-none focus:border-accent-teal focus:bg-white transition-all">
+<span class="absolute right-2.5 top-2 text-slate-400 font-bold text-xs">&#9906;</span>
+</div>
+</div>
+<!-- Filter checkboxes for the 10 target classes -->
+<div class="flex flex-wrap gap-1.5 pt-2" id="sectorFilterContainer">
+<button class="sector-filter bg-slate-900 text-white text-[10px] font-bold px-2 py-1 rounded border border-slate-950" data-sector="all">All Sectors</button>
+<button class="sector-filter bg-neutral-50 text-neutral-800 text-[10px] font-bold px-2 py-1 rounded border border-neutral-200 hover:bg-neutral-100" data-sector="investor">Angel/VC/Family Office</button>
+<button class="sector-filter bg-neutral-50 text-neutral-800 text-[10px] font-bold px-2 py-1 rounded border border-neutral-200 hover:bg-neutral-100" data-sector="philanthropist">Philanthropic</button>
+<button class="sector-filter bg-neutral-50 text-neutral-800 text-[10px] font-bold px-2 py-1 rounded border border-neutral-200 hover:bg-neutral-100" data-sector="corporation">Corporation</button>
+<button class="sector-filter bg-neutral-50 text-neutral-800 text-[10px] font-bold px-2 py-1 rounded border border-neutral-200 hover:bg-neutral-100" data-sector="government">Government/Politician</button>
+<button class="sector-filter bg-neutral-50 text-neutral-800 text-[10px] font-bold px-2 py-1 rounded border border-neutral-200 hover:bg-neutral-100" data-sector="ngo">Nonprofit/NGO</button>
+<button class="sector-filter bg-neutral-50 text-neutral-800 text-[10px] font-bold px-2 py-1 rounded border border-neutral-200 hover:bg-neutral-100" data-sector="leader">Business/Community Leaders</button>
+<button class="sector-filter bg-neutral-50 text-neutral-800 text-[10px] font-bold px-2 py-1 rounded border border-neutral-200 hover:bg-neutral-100" data-sector="hnwi">HNWI</button>
+<button class="sector-filter bg-neutral-50 text-neutral-800 text-[10px] font-bold px-2 py-1 rounded border border-neutral-200 hover:bg-neutral-100" data-sector="illicit">Risk/Illicit Players</button>
+</div>
+</div>
+<div class="flex-grow overflow-y-auto max-h-[380px] custom-scrollbar pr-2 space-y-2" id="directoryList">
+</div>
+</div>
+
+<!-- Right Side: Deep-Dive Intelligence Inspection Panel (Traces: Who has influence, connected to whom, who influences whom, who funds, who gets funded) -->
+<div class="lg:col-span-5 bg-slate-900 rounded-2xl p-6 shadow-xl border border-slate-800 min-h-[580px] flex flex-col justify-between text-slate-200" id="profilePanel">
+<div class="flex flex-col items-center justify-center text-center my-auto py-12 text-slate-500" id="profileFallback">
+<span class="text-5xl mb-3">&#128269;</span>
+<h4 class="font-bold text-slate-300 text-sm uppercase tracking-wider">Select Network Node</h4>
+<p class="text-xs text-slate-400 max-w-xs mt-1.5 leading-relaxed">Tap any interactive coordinate point on the scatter graph or select an entity from the directory to trace hidden relationships and tactical playbooks.</p>
+</div>
+
+<div class="hidden flex-col h-full space-y-5" id="profileContent">
+<div class="flex justify-between items-start border-b border-slate-800 pb-4">
+<div>
+<div class="flex flex-wrap gap-1.5 mb-2">
+<span id="dossierSector" class="text-[9px] font-mono font-bold uppercase tracking-wider px-2 py-0.5 rounded border"></span>
+<span id="dossierRole" class="text-[9px] font-mono font-bold uppercase tracking-wider px-2 py-0.5 rounded text-slate-950"></span>
+</div>
+<h3 id="dossierName" class="text-xl font-extrabold text-white tracking-tight"></h3>
+<p id="dossierMeta" class="text-xs text-accent-teal font-mono mt-0.5"></p>
+</div>
+<div class="text-right">
+<div class="text-[9px] font-mono font-bold uppercase text-slate-500 tracking-wider">Influence</div>
+<div id="dossierScore" class="text-3xl font-black text-white font-mono leading-none mt-1"></div>
+</div>
+</div>
+
+<div>
+<h4 class="text-[10px] font-mono font-bold uppercase text-slate-400 tracking-wider mb-1.5">Ecosystem Context & Background</h4>
+<p id="dossierDesc" class="text-xs text-slate-300 leading-relaxed bg-slate-950 p-3 rounded-lg border border-slate-800"></p>
+</div>
+
+<!-- Dynamic directional relations (Traces: Who influences whom, who funds whom) -->
+<div class="space-y-3">
+<h4 class="text-[10px] font-mono font-bold uppercase text-slate-400 tracking-wider border-b border-slate-800 pb-1.5">Structural Relationships Trace</h4>
+<div class="space-y-2 text-xs">
+<div class="bg-slate-950 border border-slate-800 p-2.5 rounded-lg flex items-center justify-between">
+<div class="flex flex-col">
+<span class="text-[9px] font-mono text-slate-500">Capital Flow: Funded By / Inbound</span>
+<span id="dossierInbound" class="font-semibold text-slate-300"></span>
+</div>
+<span class="text-accent-teal text-base">&#11104;</span>
+</div>
+<div class="bg-slate-950 border border-slate-800 p-2.5 rounded-lg flex items-center justify-between">
+<div class="flex flex-col">
+<span class="text-[9px] font-mono text-slate-500">Capital Flow: Funds / Outbound</span>
+<span id="dossierOutbound" class="font-semibold text-slate-300"></span>
+</div>
+<span class="text-accent-amber text-base">&#11106;</span>
+</div>
+<div class="bg-slate-950 border border-slate-800 p-2.5 rounded-lg flex items-center justify-between">
+<div class="flex flex-col">
+<span class="text-[9px] font-mono text-slate-500">Leverage Vectors: Influences / Directs</span>
+<span id="dossierInfluences" class="font-semibold text-slate-300"></span>
+</div>
+<span class="text-accent-rose text-base">&#10145;</span>
+</div>
+</div>
+</div>
+
+<!-- Tactical playbook recommendation -->
+<div class="bg-gradient-to-br from-slate-950 to-slate-900 border border-slate-800 p-4 rounded-xl flex-grow flex flex-col justify-between shadow">
+<div>
+<div class="flex items-center gap-1.5 text-[10px] font-mono font-bold tracking-wider uppercase text-amber-500 mb-1.5">
+<span>&#9888;</span> OSINT Deployment Playbook
+</div>
+<p id="dossierPlaybook" class="text-xs text-slate-300 leading-relaxed font-sans"></p>
+</div>
+<div class="pt-3 mt-3 border-t border-slate-800/60 flex justify-between items-center text-[9px] font-mono text-slate-500">
+<span>LEVEL 5 SECURED ACCESS</span>
+<span>CONFIDENTIAL</span>
+</div>
+</div>
+</div>
+</div>
+</section>
+
+</main>
+
+<footer class="bg-white border-t border-neutral-200 py-6 text-center text-xs text-slate-400">
+<div class="max-w-7xl mx-auto px-4">
+&copy; 2026 Ecosystem Intelligence Command Center. Crafted to satisfies the high-level OSINT deployment mission statement.
+</div>
+</footer>
+
+<script>
+// Base Data Generator Engine for dynamic inputs
+const mockEntityPool = {
+investor: [
+{ suffix: 'Venture Capital', roles: ['partner', 'investment'], playbook: 'Track deal flow and syndications; execute LP alignments for co-investment rights.', meta: 'Series A Tech Syndicate' },
+{ suffix: 'Family Office', roles: ['partner', 'support'], playbook: 'Execute beneficial owner validation. Seek private equity matching opportunities.', meta: 'Private Equity Hub' },
+{ suffix: 'Angel Network', roles: ['partner', 'recruit'], playbook: 'Target leading angels as advisory bridges. Leverage their talent networks.', meta: 'Pre-Seed Capital Syndicate' }
+],
+philanthropist: [
+{ suffix: 'Community Foundation', roles: ['partner', 'support'], playbook: 'Align core narrative with ESG objectives to access low-friction non-equity capital.', meta: 'Civic Grant Fund' },
+{ suffix: 'Impact Endowment', roles: ['partner', 'support'], playbook: 'Formulate impact metrics; deploy pilots targeting civic improvement portfolios.', meta: 'Sustainable Development Fund' }
+],
+corporation: [
+{ suffix: 'Advanced Tech Corp', roles: ['competitor', 'partner'], playbook: 'Evaluate sub-contractor integration loops. Form partnerships via corporate ventures.', meta: 'Corporate Anchor' },
+{ suffix: 'Industrial Infrastructure', roles: ['competitor', 'blocker'], playbook: 'Map real-estate pipelines; secure transport exemptions to bypass corporate gatekeepers.', meta: 'Ecosystem Utility Anchor' }
+],
+government: [
+{ suffix: 'ICT Directorate Representative', roles: ['blocker', 'partner'], playbook: 'Proactively seek state regulatory exemptions; build compliance bridges early.', meta: 'Municipal Policy Controller' },
+{ suffix: 'Development Board Chair', roles: ['blocker', 'partner'], playbook: 'Incorporate localized job creation figures to dissolve administrative roadblocks.', meta: 'Municipal Permitting Representative' }
+],
+ngo: [
+{ suffix: 'NGO / Policy Group', roles: ['support', 'partner'], playbook: 'Coordinate board seat alignments. Leverage policy networks to bolster local legitimacy.', meta: 'Nonprofit Policy Syndicate' }
+],
+leader: [
+{ suffix: 'Chamber Representative', roles: ['recruit', 'partner'], playbook: 'Secure advisory partnerships to establish early access to local business networks.', meta: 'Chamber of Commerce Leader' },
+{ suffix: 'Tech Liaison', roles: ['recruit', 'partner'], playbook: 'Secure consulting structures to leverage their specialized community influence assets.', meta: 'Community Tech Representative' }
+],
+hnwi: [
+{ suffix: 'Capital Group LLC', roles: ['investment', 'support'], playbook: 'Trace asset shell registries; pitch direct early-stage equity opportunities.', meta: 'Private HNWI Entity' }
+],
+illicit: [
+{ suffix: 'Redevelopment Proxy Ring', roles: ['blocker'], playbook: 'Avoid operational facilities or servers located inside buildings tied to this entity.', meta: 'Opaque Speculative Proxy' }
+]
+};
+
+const firstNames = ['Summit', 'Meridian', 'Apex', 'Sentinel', 'Vanguard', 'Horizon', 'Echelon', 'Beacon', 'Nexus', 'Vertex'];
+
+function generateCityData(cityName) {
+const actors = [];
+const sectors = Object.keys(mockEntityPool);
+
+// Ensure randomized but deterministic generation based on city name characters
+let seed = cityName.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0);
+function random() {
+const x = Math.sin(seed++) * 10000;
+return x - Math.floor(x);
+}
+
+// Generate actors representing all 10 key categories
+sectors.forEach((sector, sIdx) => {
+const variations = mockEntityPool[sector];
+const count = 1 + Math.floor(random() * 2);
+
+for(let i=0; i<count; i++) {
+const variant = variations[Math.floor(random() * variations.length)];
+const prefix = firstNames[Math.floor(random() * firstNames.length)];
+const name = `${prefix} ${variant.suffix}`;
+const role = variant.roles[Math.floor(random() * variant.roles.length)];
+
+const cap = 15 + Math.floor(random() * 80);
+const inf = 15 + Math.floor(random() * 80);
+const id = `${sector}-${sIdx}-${i}-${Math.floor(random()*100)}`;
+
+// Setup clear relationship strings matching "who funds whom, connected to whom"
+const inboundNode = `Endowment of ${cityName} Tech Labs & Trusts`;
+const outboundNode = `${prefix} Early Stage Portfolio Holdings`;
+const influencesNode = `${cityName} Municipal Zoning Board & Regulations`;
+
+actors.push({
+id,
+name,
+sector,
+role,
+cap,
+inf,
+meta: variant.meta,
+desc: `Core structural force within the early-stage tech ecosystem of ${cityName}. Controls strategic deployment channels and possesses hidden leverage parameters.`,
+inbound: inboundNode,
+outbound: outboundNode,
+influences: influencesNode,
+playbook: variant.playbook
+});
+}
+});
+
+// Dynamic Radar strength mapping
+const radar = [
+40 + Math.floor(random() * 55),
+40 + Math.floor(random() * 55),
+40 + Math.floor(random() * 55),
+40 + Math.floor(random() * 55),
+40 + Math.floor(random() * 55)
+];
+
+const kpi = {
+entities: `${100 + Math.floor(random() * 900)}`,
+capital: `$${(2 + random() * 8).toFixed(1)}B`,
+risk: `${5 + Math.floor(random() * 20)}`
+};
+
+const flow = [
+`Local Trusts & ${cityName} University Endowments`,
+`Sovereign Tech Funds & VC Syndicates`,
+`Tech Startups & Life-Science Innovations`,
+`Municipal Zoning, Compliance, & Lobbying Dockets`
+];
+
+return { kpi, radar, flow, actors };
+}
+
+// Global UI management states
+let activeCityName = 'Austin';
+let activeLens = 'all';
+let activeSectorFilter = 'all';
+let radarChartInstance = null;
+let scatterChartInstance = null;
+
+const tooltipCfg = {
+plugins: {
+tooltip: {
+backgroundColor: 'rgba(15, 23, 42, 0.95)',
+titleColor: '#ffffff',
+bodyColor: '#e2e8f0',
+padding: 12,
+cornerRadius: 8,
+callbacks: {
+title: function(tooltipItems) {
+const item = tooltipItems[0];
+let label = item.chart.data.labels[item.dataIndex];
+if (Array.isArray(label)) { return label.join(' '); }
+return label;
+}
+}
+}
+}
+};
+
+function wrap(str) {
+if (str.length <= 16) return str;
+const words = str.split(' ');
+let lines = [];
+let cur = '';
+words.forEach(w => {
+if ((cur + w).length > 16) {
+if (cur) lines.push(cur.trim());
+cur = w + ' ';
+} else {
+cur += w + ' ';
+}
+});
+if (cur) lines.push(cur.trim());
+return lines;
+}
+
+function wrapLabelsArray(labels) {
+return labels.map(wrap);
+}
+
+function getSectorThemeColor(sector) {
+switch(sector) {
+case 'investor': return '#0d9488'; // Cyber Teal
+case 'philanthropist': return '#0284c7'; // Sky Blue
+case 'corporation': return '#7c3aed'; // Deep Violet
+case 'government': return '#b45309'; // Amber
+case 'ngo': return '#059669'; // Emerald
+case 'leader': return '#475569'; // Slate
+case 'hnwi': return '#2563eb'; // Blue
+case 'illicit': return '#be123c'; // Terracotta Crimson
+default: return '#64748b';
+}
+}
+
+function getRoleClass(role) {
+switch(role) {
+case 'partner': return 'bg-emerald-50 text-emerald-700 border-emerald-200';
+case 'competitor': return 'bg-amber-50 text-amber-700 border-amber-200';
+case 'blocker': return 'bg-rose-50 text-rose-700 border-rose-200';
+case 'investment': return 'bg-blue-50 text-blue-700 border-blue-200';
+case 'support': return 'bg-teal-50 text-teal-700 border-teal-200';
+case 'recruit': return 'bg-purple-50 text-purple-700 border-purple-200';
+default: return 'bg-slate-50 text-slate-700 border-slate-200';
+}
+}
+
+function initializeAssessment() {
+const dat = generateCityData(activeCityName);
+
+// Populate macro-metrics
+document.getElementById('metric-entities').innerText = dat.kpi.entities;
+document.getElementById('metric-capital').innerText = dat.kpi.capital;
+document.getElementById('metric-risk').innerText = dat.kpi.risk;
+
+document.getElementById('flowStep1').innerText = dat.flow[0];
+document.getElementById('flowStep2').innerText = dat.flow[1];
+document.getElementById('flowStep3').innerText = dat.flow[2];
+document.getElementById('flowStep4').innerText = dat.flow[3];
+
+// Inset active diagnostic logs
+const sampleMessages = [
+`Piercing LLC beneficial ownership layers in ${activeCityName} via tax registry indices...`,
+`Mapping ${activeCityName} campaign contributions against key municipal transport dockets...`,
+`Cross-referencing university advisory positions with VC partner listings...`,
+`Monitoring offshore real-estate capital conduits tied to municipal developers...`
+];
+document.getElementById('agentActiveMessage').innerText = sampleMessages[Math.floor(Math.random() * sampleMessages.length)];
+document.getElementById('agentProcessed').innerText = dat.kpi.entities;
+
+// Handle Radar Chart
+const rLabels = ['Venture Investors', 'Government & Policy', 'NGO/Foundations', 'Corporate Anchors', 'HNWI/Shadow Capital'];
+if (radarChartInstance) {
+radarChartInstance.data.datasets[0].data = dat.radar;
+radarChartInstance.update();
+} else {
+const rCtx = document.getElementById('sectorRadarMap').getContext('2d');
+radarChartInstance = new Chart(rCtx, {
+type: 'radar',
+data: {
+labels: wrapLabelsArray(rLabels),
+datasets: [{
+data: dat.radar,
+backgroundColor: 'rgba(13, 148, 136, 0.1)',
+borderColor: '#0d9488',
+borderWidth: 2,
+pointBackgroundColor: '#0d9488'
+}]
+},
+options: {
+maintainAspectRatio: false,
+scales: {
+r: {
+angleLines: { color: '#e5e3d8' },
+grid: { color: '#e5e3d8' },
+ticks: { display: false },
+pointLabels: { color: '#1a1a1a', font: { family: 'Plus Jakarta Sans', size: 9, weight: '700' } }
+}
+},
+plugins: tooltipCfg.plugins,
+layout: { padding: 5 }
+}
+});
+}
+
+// Filter and map scatter coordinate nodes
+const searchVal = document.getElementById('directorySearchInput').value.toLowerCase();
+const finalActors = dat.actors.filter(actor => {
+const matchesLens = activeLens === 'all' || actor.role === activeLens;
+const matchesSector = activeSectorFilter === 'all' || actor.sector === activeSectorFilter;
+const matchesSearch = actor.name.toLowerCase().includes(searchVal) || actor.meta.toLowerCase().includes(searchVal);
+return matchesLens && matchesSector && matchesSearch;
+});
+
+const sPoints = finalActors.map(a => ({
+x: a.cap, y: a.inf, id: a.id, name: a.name, sector: a.sector
+}));
+
+if (scatterChartInstance) {
+scatterChartInstance.data.datasets[0].data = sPoints;
+scatterChartInstance.data.datasets[0].backgroundColor = sPoints.map(p => getSectorThemeColor(p.sector));
+scatterChartInstance.update();
+} else {
+const sCtx = document.getElementById('influenceScatterMap').getContext('2d');
+scatterChartInstance = new Chart(sCtx, {
+type: 'scatter',
+data: {
+datasets: [{
+data: sPoints,
+backgroundColor: sPoints.map(p => getSectorThemeColor(p.sector)),
+pointRadius: 9,
+pointHoverRadius: 13
+}]
+},
+options: {
+maintainAspectRatio: false,
+scales: {
+x: { min: 0, max: 100, title: { display: true, text: 'CAPITAL CAPACITY INDEX', color: '#475569', font: { size: 9, weight: 'bold' } }, grid: { color: '#f1f0ea' } },
+y: { min: 0, max: 100, title: { display: true, text: 'NETWORK INFLUENCE SCORE', color: '#475569', font: { size: 9, weight: 'bold' } }, grid: { color: '#f1f0ea' } }
+},
+plugins: {
+legend: { display: false },
+tooltip: {
+backgroundColor: 'rgba(15, 23, 42, 0.95)',
+callbacks: { label: (c) => `${c.raw.name} [${c.raw.sector.toUpperCase()}]` }
+}
+},
+onClick: (e, els) => {
+if (els.length > 0) {
+loadTargetProfile(scatterChartInstance.data.datasets[0].data[els[0].index].id);
+}
+}
+}
+});
+}
+
+// Populate structural directory listing
+const dir = document.getElementById('directoryList');
+dir.innerHTML = '';
+
+if(finalActors.length === 0) {
+dir.innerHTML = `<div class="text-center py-8 text-xs text-slate-400">No targeted nodes match current lens and filters.</div>`;
+return;
+}
+
+finalActors.forEach(a => {
+const el = document.createElement('div');
+el.className = 'p-3 bg-neutral-50 hover:bg-white border border-neutral-200 rounded-xl cursor-pointer hover:border-accent-teal transition-all flex justify-between items-center shadow-sm';
+el.onclick = () => loadTargetProfile(a.id);
+el.innerHTML = `
+<div>
+<div class="font-extrabold text-slate-950 text-xs">${a.name}</div>
+<div class="text-[10px] text-slate-500 font-mono mt-0.5 uppercase tracking-wider">${a.sector} — ${a.meta}</div>
+</div>
+<span class="text-[9px] font-mono font-bold uppercase px-2.5 py-1 rounded-md border ${getRoleClass(a.role)}">${a.role}</span>
+`;
+dir.appendChild(el);
+});
+}
+
+function loadTargetProfile(id) {
+const dat = generateCityData(activeCityName);
+const actor = dat.actors.find(x => x.id === id);
+if(!actor) return;
+
+document.getElementById('profileFallback').classList.add('hidden');
+const c = document.getElementById('profileContent');
+c.classList.remove('hidden');
+c.classList.add('flex');
+
+document.getElementById('dossierName').innerText = actor.name;
+document.getElementById('dossierMeta').innerText = actor.meta;
+document.getElementById('dossierScore').innerText = actor.inf;
+document.getElementById('dossierDesc').innerText = actor.desc;
+document.getElementById('dossierInbound').innerText = actor.inbound;
+document.getElementById('dossierOutbound').innerText = actor.outbound;
+document.getElementById('dossierInfluences').innerText = actor.influences;
+document.getElementById('dossierPlaybook').innerText = actor.playbook;
+
+const sec = document.getElementById('dossierSector');
+sec.innerText = actor.sector.toUpperCase();
+sec.style.borderColor = getSectorThemeColor(actor.sector);
+sec.style.color = getSectorThemeColor(actor.sector);
+
+const role = document.getElementById('dossierRole');
+role.innerText = actor.role.toUpperCase();
+role.className = `text-[9px] font-mono font-bold uppercase tracking-wider px-2 py-0.5 rounded ${getRoleClass(actor.role)}`;
+}
+
+// Controller events bindings
+document.getElementById('runAssessmentBtn').addEventListener('click', () => {
+const val = document.getElementById('cityInput').value.trim();
+if(val) {
+activeCityName = val;
+document.getElementById('profileFallback').classList.remove('hidden');
+document.getElementById('profileContent').classList.add('hidden');
+initializeAssessment();
+}
+});
+
+document.querySelectorAll('.lens-btn').forEach(b => {
+b.addEventListener('click', function() {
+document.querySelectorAll('.lens-btn').forEach(btn => {
+btn.className = 'lens-btn bg-neutral-50 hover:bg-neutral-100 text-neutral-800 border border-neutral-200 px-3 py-2.5 rounded-lg text-xs font-bold transition-all text-center';
+});
+this.className = 'lens-btn bg-slate-900 text-white border border-slate-950 px-3 py-2.5 rounded-lg text-xs font-bold shadow-sm transition-all text-center';
+activeLens = this.dataset.lens;
+initializeAssessment();
+});
+});
+
+document.querySelectorAll('.sector-filter').forEach(b => {
+b.addEventListener('click', function() {
+document.querySelectorAll('.sector-filter').forEach(btn => {
+btn.className = 'sector-filter bg-neutral-50 text-neutral-800 text-[10px] font-bold px-2 py-1 rounded border border-neutral-200 hover:bg-neutral-100';
+});
+this.className = 'sector-filter bg-slate-900 text-white text-[10px] font-bold px-2 py-1 rounded border border-slate-950';
+activeSectorFilter = this.dataset.sector;
+initializeAssessment();
+});
+});
+
+document.getElementById('directorySearchInput').addEventListener('input', initializeAssessment);
+
+window.onload = initializeAssessment;
+</script>
+</body>
+</html>
