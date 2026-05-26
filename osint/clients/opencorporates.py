@@ -69,6 +69,7 @@ class OpenCorporatesClient:
             DOMAIN,
             f"{BASE_URL}/companies/search",
             params=self._params(params),
+            timeout=10.0,   # OC is slow — fail fast rather than 30s default
         )
 
     async def get_company(
@@ -79,6 +80,7 @@ class OpenCorporatesClient:
             DOMAIN,
             f"{BASE_URL}/companies/{jurisdiction_code}/{company_number}",
             params=self._params(),
+            timeout=10.0,
         )
 
     async def search_officers(
@@ -95,6 +97,7 @@ class OpenCorporatesClient:
             DOMAIN,
             f"{BASE_URL}/officers/search",
             params=self._params(params),
+            timeout=10.0,
         )
 
     async def get_company_network(
@@ -105,4 +108,5 @@ class OpenCorporatesClient:
             DOMAIN,
             f"{BASE_URL}/companies/{jurisdiction_code}/{company_number}/network",
             params=self._params(),
+            timeout=10.0,
         )

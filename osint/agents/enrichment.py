@@ -1961,6 +1961,24 @@ class EnrichmentAgent(BaseAgent):
 
         Returns True if at least one case was found.
         """
+        # Guard: skip entity names that are clearly list descriptions or synthetic
+        # artifacts — CourtListener returns 400 for these.
+        # Indicators: very long names, contains numbers/parentheses suggesting CIK appending,
+        # starts with ordinal words like "Top", "Greater", etc.
+        _SKIP_PREFIXES = ("top ", "greater ", "leading ", "major ", "largest ",
+                          "best ", "key ", "notable ", "prominent ")
+        name_lower = name.lower()
+        if (
+            len(name) > 80                          # implausibly long for a real entity name
+            or "(" in name and "cik" in name_lower  # CIK-appended string from EDGAR
+            or any(name_lower.startswith(p) for p in _SKIP_PREFIXES)
+        ):
+            log.debug(
+                "enrichment_agent: skipping CourtListener for '%s' — name looks like a list artifact",
+                name,
+            )
+            return False
+
         log.debug("enrichment_agent: CourtListener search for '%s'", name)
 
         try:

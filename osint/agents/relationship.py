@@ -649,27 +649,46 @@ class RelationshipAgent(BaseAgent):
                         run_id=run_id,
                     )
 
-        # From pipeline_agent output: founders list
+        # From executive_hnw entities whose subtype indicates founder.
+        # Field name mapping:
+        #   - Old pipeline_agent path: is_founder (bool) + primary_employer
+        #   - executive_hnw.py (Crunchbase): executive_subtype in ("founder","serial_founder") + current_company
+        #   - Form D stubs: no explicit founder flag (use is_executive flag instead)
+        _FOUNDER_SUBTYPES = {"founder", "serial_founder"}
         for exec_entity in by_type.get("executive_hnw", []):
             cat = exec_entity.get("category_fields", {})
-            if cat.get("is_founder") and cat.get("primary_employer"):
-                employer_name = cat["primary_employer"]
-                corp = _find_by_name(name_index, employer_name, "corporate")
-                if corp:
-                    source_urls = exec_entity.get("source_urls", [])
-                    rb.add(
-                        source_entity=exec_entity,
-                        target_entity=corp,
-                        rel_type="FOUNDED",
-                        evidence_snippet=(
-                            f"{exec_entity.get('canonical_name')} is founder of "
-                            f"{corp.get('canonical_name')}"
-                        ),
-                        source_url=(source_urls[0] if source_urls else SOURCE_URL_FALLBACKS["crunchbase"]),
-                        source_quality="primary",
-                        confidence="medium",
-                        run_id=run_id,
-                    )
+
+            # Path 1: legacy is_founder bool field
+            if cat.get("is_founder"):
+                employer_name = cat.get("primary_employer") or cat.get("current_employer") or cat.get("current_company")
+            # Path 2: Crunchbase executive_subtype
+            elif cat.get("executive_subtype") in _FOUNDER_SUBTYPES:
+                employer_name = cat.get("current_company") or cat.get("current_employer") or cat.get("primary_employer")
+            else:
+                employer_name = None
+
+            if not employer_name:
+                continue
+
+            corp = (
+                _find_by_name(name_index, employer_name, "corporate")
+                or _find_by_name(name_index, employer_name, "investor")
+            )
+            if corp:
+                source_urls = exec_entity.get("source_urls", [])
+                rb.add(
+                    source_entity=exec_entity,
+                    target_entity=corp,
+                    rel_type="FOUNDED",
+                    evidence_snippet=(
+                        f"{exec_entity.get('canonical_name')} is founder of "
+                        f"{corp.get('canonical_name')}"
+                    ),
+                    source_url=(source_urls[0] if source_urls else SOURCE_URL_FALLBACKS["crunchbase"]),
+                    source_quality="primary",
+                    confidence="medium",
+                    run_id=run_id,
+                )
 
     def _extract_employed_by(
         self,
@@ -678,10 +697,23 @@ class RelationshipAgent(BaseAgent):
         rb: _RelBuilder,
         run_id: str,
     ) -> None:
-        """executive_hnw → corporate: from current_employer."""
+        """executive_hnw → corporate: from current_employer or current_company.
+
+        Field name mapping:
+          - Form D stubs (corporate.py)  → category_fields["current_employer"]
+          - Crunchbase people (executive_hnw.py) → category_fields["current_company"]
+          - SerpAPI fallback (executive_hnw.py)  → category_fields["current_company"]
+        We check both so either path produces EMPLOYED_BY edges.
+        """
         for exec_entity in by_type.get("executive_hnw", []):
             cat = exec_entity.get("category_fields", {})
-            employer = cat.get("current_employer") or cat.get("primary_employer") or cat.get("employer_name")
+            # Check all known field names — collection agents use different keys
+            employer = (
+                cat.get("current_employer")
+                or cat.get("primary_employer")
+                or cat.get("employer_name")
+                or cat.get("current_company")   # executive_hnw.py (Crunchbase + Proxycurl)
+            )
             if not employer:
                 continue
 
@@ -694,6 +726,11 @@ class RelationshipAgent(BaseAgent):
                 continue
 
             source_urls = exec_entity.get("source_urls", [])
+            title = (
+                cat.get("primary_role")
+                or cat.get("current_title")   # executive_hnw.py uses current_title
+                or "unknown"
+            )
             rb.add(
                 source_entity=exec_entity,
                 target_entity=corp,
@@ -701,7 +738,7 @@ class RelationshipAgent(BaseAgent):
                 evidence_snippet=(
                     f"{exec_entity.get('canonical_name')} is employed by "
                     f"{corp.get('canonical_name')} "
-                    f"(title: {cat.get('primary_role', 'unknown')})"
+                    f"(title: {title})"
                 ),
                 source_url=(source_urls[0] if source_urls else SOURCE_URL_FALLBACKS["crunchbase"]),
                 source_quality="primary" if exec_entity.get("overall_confidence") == "high" else "secondary",
@@ -716,14 +753,25 @@ class RelationshipAgent(BaseAgent):
         rb: _RelBuilder,
         run_id: str,
     ) -> None:
-        """executive_hnw/politician → corporate/nonprofit: from board_seats."""
+        """executive_hnw/politician → corporate/nonprofit: from board_seats.
+
+        Two paths:
+          1. Explicit board_seats list (Form D stubs + enrichment sources)
+          2. executive_subtype == "board_member" + current_company (Crunchbase bulk search)
+             — Crunchbase people search infers "board_member" subtype when title contains
+               "board member / board director / chairman". The primary_organization
+               is stored as current_company. Use it to derive a SITS_ON_BOARD_OF edge.
+        """
+        _BOARD_SUBTYPES = {"board_member"}
+
         for exec_entity in list(by_type.get("executive_hnw", [])) + list(by_type.get("politician", [])):
             cat = exec_entity.get("category_fields", {})
+            source_urls = exec_entity.get("source_urls", [])
+
+            # Path 1: explicit board_seats list (Form D stubs, enrichment)
             board_seats = cat.get("board_seats") or []
             if not isinstance(board_seats, list):
-                continue
-
-            source_urls = exec_entity.get("source_urls", [])
+                board_seats = []
             for org_name in board_seats:
                 if not org_name:
                     continue
@@ -746,6 +794,31 @@ class RelationshipAgent(BaseAgent):
                         confidence="medium",
                         run_id=run_id,
                     )
+
+            # Path 2: executive_subtype == "board_member" + current_company (Crunchbase bulk)
+            if cat.get("executive_subtype") in _BOARD_SUBTYPES:
+                org_name = cat.get("current_company") or cat.get("current_employer")
+                if org_name:
+                    org = (
+                        _find_by_name(name_index, org_name, "corporate")
+                        or _find_by_name(name_index, org_name, "nonprofit")
+                        or _find_by_name(name_index, org_name, "philanthropic")
+                    )
+                    if org:
+                        title = cat.get("current_title", "board member")
+                        rb.add(
+                            source_entity=exec_entity,
+                            target_entity=org,
+                            rel_type="SITS_ON_BOARD_OF",
+                            evidence_snippet=(
+                                f"{exec_entity.get('canonical_name')} serves as {title} "
+                                f"of {org.get('canonical_name')} (Crunchbase)"
+                            ),
+                            source_url=(source_urls[0] if source_urls else SOURCE_URL_FALLBACKS["crunchbase"]),
+                            source_quality="secondary",
+                            confidence="medium",
+                            run_id=run_id,
+                        )
 
     def _extract_donated_to(
         self,

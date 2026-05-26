@@ -61,6 +61,11 @@ class SupabaseClient:
             min_size=2,
             max_size=10,
             command_timeout=30,
+            # Supabase's pooler drops idle connections after ~5 minutes.
+            # Setting max_inactive_connection_lifetime to 300s ensures asyncpg
+            # recycles connections before the pooler kills them, preventing
+            # "connection closed unexpectedly" errors mid-pipeline.
+            max_inactive_connection_lifetime=300,
         )
         log.info("SupabaseClient: connection pool created (min=2, max=10)")
 
@@ -752,8 +757,9 @@ class SupabaseClient:
 
         query = f"""
             SELECT run_id, city_name, country_or_region, city_key,
-                   run_status, started_at, completed_at,
+                   run_status, started_at, completed_at, duration_seconds,
                    total_entities_found, total_relationships_found,
+                   total_claims_verified, gap_fill_triggered,
                    overall_confidence, failure_reason
             FROM agent_runs
             {where}
@@ -900,11 +906,15 @@ class SupabaseClient:
 
         query = f"""
             SELECT
-                entity_id, canonical_name, entity_type, primary_city,
+                entity_id, canonical_name, entity_type, entity_subtype,
+                primary_city, primary_state,
                 overall_confidence, needs_review,
-                score_influence, score_partner_potential,
+                score_influence, score_partner_potential, score_startup_relevance,
                 score_blocker_risk, score_competitor_potential,
-                partner_candidate, blocker_candidate, top_influencer,
+                score_investment_potential, score_recruiting_potential,
+                score_supporter_potential,
+                partner_candidate, blocker_candidate, competitor_candidate,
+                investment_candidate, top_influencer,
                 description, source_run_ids, created_at
             FROM entities
             WHERE {where_clause}

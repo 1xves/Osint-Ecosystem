@@ -140,7 +140,7 @@ RATE_LIMITS: dict[str, dict] = {
     },
     "opencorporates": {
         "requests_per_minute": 30,
-        "retry_backoff_seconds": [2, 5, 15],
+        "retry_backoff_seconds": [2],   # 1 retry only — OC frequently returns 401/network errors
         "cache_ttl_seconds": 604800,
     },
     "courtlistener": {
