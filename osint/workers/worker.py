@@ -319,11 +319,51 @@ class WorkerSettings:
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Common country name → ISO 3166-1 alpha-2 mapping.
+# [:2] on the country *name* is wrong — "United States"[:2] = "un", not "us".
+# Extend this table as new countries are added to the pipeline.
+_COUNTRY_ISO2: dict[str, str] = {
+    "united states":        "us",
+    "united states of america": "us",
+    "usa":                  "us",
+    "united kingdom":       "uk",
+    "great britain":        "uk",
+    "united arab emirates": "ae",
+    "uae":                  "ae",
+    "new zealand":          "nz",
+    "south korea":          "kr",
+    "north korea":          "kp",
+    "saudi arabia":         "sa",
+    "south africa":         "za",
+    "costa rica":           "cr",
+    "czech republic":       "cz",
+    "dominican republic":   "do",
+    "el salvador":          "sv",
+    "hong kong":            "hk",
+    "new guinea":           "pg",
+    "puerto rico":          "pr",
+    "sri lanka":            "lk",
+    "trinidad and tobago":  "tt",
+}
+
+
 def _city_key(city_name: str, country_or_region: str) -> str:
-    return (
-        f"{city_name.lower().replace(' ', '_')}_"
-        f"{country_or_region[:2].lower()}"
-    )
+    """
+    Produce a stable, URL-safe city identifier.
+
+    Format: {city_slug}_{iso2}   e.g. "philadelphia_us", "london_uk"
+
+    Uses a lookup table for multi-word country names so that
+    "United States" → "us" (not "un" from [:2] slicing).
+    Falls back to first-two-chars for countries not in the table.
+    """
+    iso2 = _COUNTRY_ISO2.get(country_or_region.lower().strip())
+    if iso2 is None:
+        # Fallback: first 2 chars of the first word (handles single-word names
+        # like "Germany" → "ge", "France" → "fr", "Canada" → "ca")
+        iso2 = country_or_region.strip().split()[0][:2].lower()
+    city_slug = city_name.lower().replace(" ", "_").replace("-", "_")
+    return f"{city_slug}_{iso2}"
 
 
 async def _disconnect_all(

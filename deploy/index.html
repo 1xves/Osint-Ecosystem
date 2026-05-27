@@ -1,0 +1,949 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OSINT Ecosystem Intelligence Command Center</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+<script>
+tailwind.config = {
+  theme: {
+    extend: {
+      fontFamily: { sans: ['Plus Jakarta Sans', 'sans-serif'] },
+      colors: {
+        neutral: { 50: '#faf9f5', 100: '#f1f0ea', 200: '#e5e3d8', 800: '#3c3c3c', 900: '#1a1a1a' },
+        accent: { teal: '#0d9488', rose: '#be123c', amber: '#b45309', slate: '#475569' }
+      }
+    }
+  }
+}
+</script>
+<style>
+body { background-color: #faf9f5; color: #1a1a1a; }
+.chart-container { position: relative; width: 100%; max-width: 100%; margin-left: auto; margin-right: auto; height: 330px; max-height: 360px; }
+.custom-scrollbar::-webkit-scrollbar { width: 5px; height: 5px; }
+.custom-scrollbar::-webkit-scrollbar-track { background: #f1f0ea; }
+.custom-scrollbar::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+.custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+</style>
+</head>
+<body class="font-sans antialiased min-h-screen flex flex-col justify-between">
+
+<!-- System Header -->
+<nav class="bg-white border-b border-neutral-200 sticky top-0 z-50 shadow-sm px-6 py-4">
+  <div class="max-w-7xl mx-auto flex flex-col lg:flex-row justify-between items-center gap-4">
+    <div class="flex items-center gap-3">
+      <div class="w-10 h-10 bg-gradient-to-tr from-slate-900 to-accent-teal rounded-xl flex items-center justify-center text-white text-xl font-bold shadow-md shadow-accent-teal/15">&#10044;</div>
+      <div>
+        <div class="flex items-center gap-2">
+          <span class="text-xs font-black tracking-widest text-slate-900 uppercase">NEXUS MULTI-AGENT OSINT SYSTEM</span>
+          <span class="bg-accent-teal/10 text-accent-teal border border-accent-teal/20 text-[9px] font-mono px-2 py-0.5 rounded tracking-wide uppercase">Operational Interface</span>
+        </div>
+        <p class="text-xs text-neutral-800">Ecosystem Entry &amp; Capital Network Influence Map Generator</p>
+      </div>
+    </div>
+    <div class="hidden xl:flex items-center gap-4 text-[10px] font-mono text-neutral-800 bg-neutral-100 px-4 py-2 rounded-lg border border-neutral-200">
+      <div class="flex items-center gap-2">
+        <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+        <span>CTA LLC Piercer: <span class="text-accent-teal">ONLINE</span></span>
+      </div>
+      <span class="text-neutral-200">|</span>
+      <div class="flex items-center gap-2">
+        <span class="w-2 h-2 rounded-full bg-cyan-500"></span>
+        <span>FEC Ingestion: <span class="text-accent-slate">SYNCED</span></span>
+      </div>
+      <span class="text-neutral-200">|</span>
+      <div class="flex items-center gap-2">
+        <span class="w-2 h-2 rounded-full bg-purple-500"></span>
+        <span>Lobby Matrices: <span class="text-purple-600">MAPPED</span></span>
+      </div>
+    </div>
+  </div>
+</nav>
+
+<!-- Config Warning Banner (shown when CONFIG.apiKey is empty) -->
+<div id="configWarning" class="hidden bg-amber-50 border-b border-amber-200 px-6 py-3">
+  <div class="max-w-7xl mx-auto flex items-center gap-3 text-xs text-amber-800">
+    <span class="font-bold">&#9888; Configuration Required:</span>
+    <span>Open this file and set <code class="bg-amber-100 px-1 py-0.5 rounded font-mono">CONFIG.apiKey</code> to your OSINT API key (settings.secret_key from .env) before running assessments.</span>
+  </div>
+</div>
+
+<main class="flex-grow w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
+
+  <!-- Target Input Domain Bar -->
+  <section class="bg-white rounded-2xl p-6 shadow-sm border border-neutral-200">
+    <div class="max-w-3xl mb-4">
+      <h2 class="text-lg font-bold text-slate-900">Ecosystem Assessment Controller</h2>
+      <p class="text-xs text-slate-500">
+        Input any city to query the OSINT intelligence database. Data is pulled live from the pipeline backend.
+        City key is derived as <code class="font-mono bg-neutral-100 px-1 rounded">{city}_un</code> — matches run records in Supabase.
+      </p>
+    </div>
+    <div class="flex flex-col sm:flex-row gap-3">
+      <div class="relative flex-grow">
+        <input type="text" id="cityInput" value="Philadelphia"
+          placeholder="Enter city name (e.g., Austin, Philadelphia, Miami)..."
+          class="w-full bg-neutral-50 border border-neutral-200 rounded-lg pl-10 pr-4 py-3 text-sm font-bold text-slate-900 focus:outline-none focus:border-accent-teal focus:bg-white transition-all">
+        <span class="absolute left-3.5 top-3.5 text-neutral-800">&#127961;</span>
+      </div>
+      <button id="runAssessmentBtn"
+        class="bg-slate-900 hover:bg-slate-800 text-white font-bold text-sm px-6 py-3 rounded-lg shadow transition-colors flex items-center justify-center gap-2">
+        <span>&#9881;</span> Load Intelligence Report
+      </button>
+    </div>
+  </section>
+
+  <!-- Tactical Query Lenses -->
+  <section class="bg-white rounded-2xl p-6 shadow-sm border border-neutral-200 space-y-4">
+    <div>
+      <h3 class="text-xs font-bold uppercase text-neutral-800 tracking-wider font-mono">Select Tactical Entry Lens</h3>
+      <p class="text-[11px] text-slate-500">Filter entities by role derived from pipeline analytical scores and candidate flags.</p>
+    </div>
+    <div class="grid grid-cols-2 md:grid-cols-6 gap-2">
+      <button data-lens="all"        class="lens-btn bg-slate-900 text-white border border-slate-950 px-3 py-2.5 rounded-lg text-xs font-bold shadow-sm transition-all text-center">All Entities</button>
+      <button data-lens="partner"    class="lens-btn bg-neutral-50 hover:bg-neutral-100 text-neutral-800 border border-neutral-200 px-3 py-2.5 rounded-lg text-xs font-bold transition-all text-center">Partners &amp; Supporters</button>
+      <button data-lens="competitor" class="lens-btn bg-neutral-50 hover:bg-neutral-100 text-neutral-800 border border-neutral-200 px-3 py-2.5 rounded-lg text-xs font-bold transition-all text-center">Potential Competitors</button>
+      <button data-lens="blocker"    class="lens-btn bg-neutral-50 hover:bg-neutral-100 text-neutral-800 border border-neutral-200 px-3 py-2.5 rounded-lg text-xs font-bold transition-all text-center">Blockers &amp; Risks</button>
+      <button data-lens="investment" class="lens-btn bg-neutral-50 hover:bg-neutral-100 text-neutral-800 border border-neutral-200 px-3 py-2.5 rounded-lg text-xs font-bold transition-all text-center">Venture Targets</button>
+      <button data-lens="recruit"    class="lens-btn bg-neutral-50 hover:bg-neutral-100 text-neutral-800 border border-neutral-200 px-3 py-2.5 rounded-lg text-xs font-bold transition-all text-center">Recruitment Pool</button>
+    </div>
+  </section>
+
+  <!-- Live Agent Ticker -->
+  <section class="bg-slate-950 border border-slate-900 rounded-xl p-4 font-mono text-[11px] text-slate-300 shadow-inner flex flex-col md:flex-row justify-between items-center gap-3">
+    <div class="flex items-center gap-2">
+      <span class="text-accent-teal">&#9654;</span>
+      <span class="text-slate-500">Live Agent Stream:</span>
+      <span id="agentActiveMessage" class="font-bold text-white">System ready. Enter a city and click Run Assessment.</span>
+    </div>
+    <div class="text-[10px] text-slate-500 flex gap-4">
+      <span>Entities: <span class="text-emerald-400 font-bold" id="agentProcessed">—</span></span>
+      <span>Relationships: <span class="text-cyan-400 font-bold" id="agentRelCount">—</span></span>
+    </div>
+  </section>
+
+  <!-- Charts Row -->
+  <section class="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
+    <div class="lg:col-span-8 bg-white rounded-2xl p-6 shadow-sm border border-neutral-200 flex flex-col justify-between">
+      <div>
+        <div class="flex justify-between items-start mb-1">
+          <div>
+            <h3 class="text-base font-extrabold text-slate-900">Relational Leverage &amp; Gravity Grid</h3>
+            <p class="text-xs text-slate-500">Maps ecosystem players on <strong class="text-accent-teal">Capital/Partner Potential (X)</strong> vs. <strong class="text-accent-rose">Network Influence Score (Y)</strong>. Tap points to inspect.</p>
+          </div>
+          <span class="bg-neutral-100 border border-neutral-200 text-neutral-800 font-mono text-[9px] px-2.5 py-1 rounded font-bold uppercase tracking-wider">Live Matrix</span>
+        </div>
+      </div>
+      <div class="chart-container relative">
+        <canvas id="influenceScatterMap"></canvas>
+        <div id="scatterNoScores" class="hidden absolute inset-0 flex flex-col items-center justify-center bg-neutral-50/90 rounded-xl text-center px-6">
+          <span class="text-3xl mb-2">&#128202;</span>
+          <p class="text-xs font-bold text-slate-600 uppercase tracking-wide">Scoring Phase Not Yet Run</p>
+          <p class="text-[11px] text-slate-400 mt-1 max-w-xs">Entity scores are null — the pipeline collected <span id="scatterEntityCount">entities</span> but the scoring + relationship agents have not yet completed for this dataset.</p>
+          <p class="text-[10px] font-mono text-accent-teal mt-2">Run: <code>./go.sh "Philadelphia" "United States"</code> to trigger a fresh scored run.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="lg:col-span-4 bg-white rounded-2xl p-6 shadow-sm border border-neutral-200 flex flex-col justify-between min-h-[400px]">
+      <div>
+        <h3 class="text-base font-extrabold text-slate-900 mb-1">Ecosystem Core Balance Map</h3>
+        <p class="text-xs text-slate-500 mb-4">Average influence index per sector — computed from live entity scores.</p>
+      </div>
+      <div class="relative h-[240px]">
+        <canvas id="sectorRadarMap"></canvas>
+        <div id="radarNoScores" class="hidden absolute inset-0 flex flex-col items-center justify-center bg-neutral-50/90 rounded-xl text-center px-4">
+          <span class="text-2xl mb-1.5">&#9899;</span>
+          <p class="text-[11px] font-bold text-slate-500 uppercase tracking-wide">Scores Pending</p>
+          <p class="text-[10px] text-slate-400 mt-1">Sector balance computed from influence scores — unavailable until scoring phase runs.</p>
+        </div>
+      </div>
+      <div class="pt-4 border-t border-neutral-200 text-center text-[10px] text-slate-500 font-mono">
+        Concentrations indicate high risk profiles or leverage points.
+      </div>
+    </div>
+  </section>
+
+  <!-- Directory & Dossier -->
+  <section class="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
+
+    <!-- Entity Directory -->
+    <div class="lg:col-span-7 bg-white rounded-2xl p-6 shadow-sm border border-neutral-200 flex flex-col min-h-[580px]">
+      <div class="border-b border-neutral-200 pb-4 mb-4 space-y-3">
+        <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2">
+          <h3 class="text-lg font-bold text-slate-900">Target Actor Matrix</h3>
+          <div class="relative w-full sm:w-60">
+            <input type="text" id="directorySearchInput" placeholder="Search name or entity type..."
+              class="w-full bg-neutral-50 border border-neutral-200 rounded-lg pl-3 pr-8 py-1.5 text-xs font-medium focus:outline-none focus:border-accent-teal focus:bg-white transition-all">
+            <span class="absolute right-2.5 top-2 text-slate-400 font-bold text-xs">&#9906;</span>
+          </div>
+        </div>
+        <div class="flex flex-wrap gap-1.5 pt-2" id="sectorFilterContainer">
+          <button class="sector-filter bg-slate-900 text-white text-[10px] font-bold px-2 py-1 rounded border border-slate-950"       data-sector="all">All Sectors</button>
+          <button class="sector-filter bg-neutral-50 text-neutral-800 text-[10px] font-bold px-2 py-1 rounded border border-neutral-200 hover:bg-neutral-100" data-sector="investor">Angel/VC/Family Office</button>
+          <button class="sector-filter bg-neutral-50 text-neutral-800 text-[10px] font-bold px-2 py-1 rounded border border-neutral-200 hover:bg-neutral-100" data-sector="philanthropist">Philanthropic</button>
+          <button class="sector-filter bg-neutral-50 text-neutral-800 text-[10px] font-bold px-2 py-1 rounded border border-neutral-200 hover:bg-neutral-100" data-sector="corporation">Corporation</button>
+          <button class="sector-filter bg-neutral-50 text-neutral-800 text-[10px] font-bold px-2 py-1 rounded border border-neutral-200 hover:bg-neutral-100" data-sector="government">Government/Politician</button>
+          <button class="sector-filter bg-neutral-50 text-neutral-800 text-[10px] font-bold px-2 py-1 rounded border border-neutral-200 hover:bg-neutral-100" data-sector="ngo">Nonprofit/NGO</button>
+          <button class="sector-filter bg-neutral-50 text-neutral-800 text-[10px] font-bold px-2 py-1 rounded border border-neutral-200 hover:bg-neutral-100" data-sector="leader">Business/Community Leaders</button>
+          <button class="sector-filter bg-neutral-50 text-neutral-800 text-[10px] font-bold px-2 py-1 rounded border border-neutral-200 hover:bg-neutral-100" data-sector="hnwi">HNWI</button>
+          <button class="sector-filter bg-neutral-50 text-neutral-800 text-[10px] font-bold px-2 py-1 rounded border border-neutral-200 hover:bg-neutral-100" data-sector="illicit">Risk/Illicit Players</button>
+        </div>
+      </div>
+      <div class="flex-grow overflow-y-auto max-h-[380px] custom-scrollbar pr-2 space-y-2" id="directoryList">
+        <div class="text-center py-12 text-xs text-slate-400">Enter a city and click Run Assessment to load entities.</div>
+      </div>
+    </div>
+
+    <!-- Dossier Panel -->
+    <div class="lg:col-span-5 bg-slate-900 rounded-2xl p-6 shadow-xl border border-slate-800 min-h-[580px] flex flex-col justify-between text-slate-200" id="profilePanel">
+      <div class="flex flex-col items-center justify-center text-center my-auto py-12 text-slate-500" id="profileFallback">
+        <span class="text-5xl mb-3">&#128269;</span>
+        <h4 class="font-bold text-slate-300 text-sm uppercase tracking-wider">Select Network Node</h4>
+        <p class="text-xs text-slate-400 max-w-xs mt-1.5 leading-relaxed">Tap any coordinate point on the scatter graph or select an entity from the directory to trace hidden relationships and tactical playbooks.</p>
+      </div>
+
+      <div class="hidden flex-col h-full space-y-5" id="profileContent">
+        <div class="flex justify-between items-start border-b border-slate-800 pb-4">
+          <div>
+            <div class="flex flex-wrap gap-1.5 mb-2">
+              <span id="dossierSector" class="text-[9px] font-mono font-bold uppercase tracking-wider px-2 py-0.5 rounded border"></span>
+              <span id="dossierRole"   class="text-[9px] font-mono font-bold uppercase tracking-wider px-2 py-0.5 rounded"></span>
+            </div>
+            <h3 id="dossierName" class="text-xl font-extrabold text-white tracking-tight"></h3>
+            <p  id="dossierMeta" class="text-xs text-accent-teal font-mono mt-0.5"></p>
+          </div>
+          <div class="text-right">
+            <div class="text-[9px] font-mono font-bold uppercase text-slate-500 tracking-wider">Influence</div>
+            <div id="dossierScore" class="text-3xl font-black text-white font-mono leading-none mt-1"></div>
+          </div>
+        </div>
+
+        <div>
+          <h4 class="text-[10px] font-mono font-bold uppercase text-slate-400 tracking-wider mb-1.5">Ecosystem Context &amp; Background</h4>
+          <p id="dossierDesc" class="text-xs text-slate-300 leading-relaxed bg-slate-950 p-3 rounded-lg border border-slate-800"></p>
+        </div>
+
+        <div class="space-y-3">
+          <h4 class="text-[10px] font-mono font-bold uppercase text-slate-400 tracking-wider border-b border-slate-800 pb-1.5">Structural Relationships Trace</h4>
+          <div class="space-y-2 text-xs">
+            <div class="bg-slate-950 border border-slate-800 p-2.5 rounded-lg flex items-center justify-between">
+              <div class="flex flex-col">
+                <span class="text-[9px] font-mono text-slate-500">Capital Flow: Funded By / Inbound</span>
+                <span id="dossierInbound" class="font-semibold text-slate-300"></span>
+              </div>
+              <span class="text-accent-teal text-base">&#11104;</span>
+            </div>
+            <div class="bg-slate-950 border border-slate-800 p-2.5 rounded-lg flex items-center justify-between">
+              <div class="flex flex-col">
+                <span class="text-[9px] font-mono text-slate-500">Capital Flow: Funds / Outbound</span>
+                <span id="dossierOutbound" class="font-semibold text-slate-300"></span>
+              </div>
+              <span class="text-accent-amber text-base">&#11106;</span>
+            </div>
+            <div class="bg-slate-950 border border-slate-800 p-2.5 rounded-lg flex items-center justify-between">
+              <div class="flex flex-col">
+                <span class="text-[9px] font-mono text-slate-500">Leverage Vectors: Influences / Directs</span>
+                <span id="dossierInfluences" class="font-semibold text-slate-300"></span>
+              </div>
+              <span class="text-accent-rose text-base">&#10145;</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="bg-gradient-to-br from-slate-950 to-slate-900 border border-slate-800 p-4 rounded-xl flex-grow flex flex-col justify-between shadow">
+          <div>
+            <div class="flex items-center gap-1.5 text-[10px] font-mono font-bold tracking-wider uppercase text-amber-500 mb-1.5">
+              <span>&#9888;</span> OSINT Deployment Playbook
+            </div>
+            <p id="dossierPlaybook" class="text-xs text-slate-300 leading-relaxed font-sans"></p>
+          </div>
+          <div class="pt-3 mt-3 border-t border-slate-800/60 flex justify-between items-center text-[9px] font-mono text-slate-500">
+            <span>LEVEL 5 SECURED ACCESS</span>
+            <span>CONFIDENTIAL</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer class="bg-white border-t border-neutral-200 py-6 text-center text-xs text-slate-400">
+  <div class="max-w-7xl mx-auto px-4">
+    &copy; 2026 Ecosystem Intelligence Command Center &mdash; Connected to OSINT FastAPI Backend
+  </div>
+</footer>
+
+<script>
+// ═══════════════════════════════════════════════════════════════════════════════
+// CONFIG — Production (vk-osint.com)
+// apiBase: Cloudflare Tunnel endpoint for your local FastAPI
+// apiKey:  Value of settings.secret_key from your .env file
+//          ⚠ This key is visible in page source — see deployment guide for
+//            how to restrict api.vk-osint.com via Cloudflare Access.
+// ═══════════════════════════════════════════════════════════════════════════════
+const CONFIG = {
+  apiBase: 'https://api.finitebuilds.com',
+  apiKey:               'df254048a96e4459b52191b8a07ee528c5cc39dfe91af4a3d58a01944ae0c861',
+  cfAccessClientId:     '',
+  cfAccessClientSecret: '',
+};
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// STATE
+// ═══════════════════════════════════════════════════════════════════════════════
+const state = {
+  cityName:           '',
+  runId:              null,
+  run:                null,
+  entities:           [],   // all raw entity objects from /entities
+  relationships:      [],   // all raw relationship objects from /runs/{id}/relationships
+  entityMap:          {},   // entity_id → entity  (O(1) dossier lookup)
+  activeLens:         'all',
+  activeSectorFilter: 'all',
+  searchText:         '',
+  loading:            false,
+  hasScores:          false,   // true once at least one entity has a non-zero score
+  radarChart:         null,
+  scatterChart:       null,
+};
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// API LAYER
+// ═══════════════════════════════════════════════════════════════════════════════
+
+async function apiFetch(path, params = {}) {
+  const url = new URL(CONFIG.apiBase + path);
+  Object.entries(params).forEach(([k, v]) => {
+    if (v !== null && v !== undefined && v !== '') {
+      url.searchParams.set(k, String(v));
+    }
+  });
+
+  const res = await fetch(url.toString(), {
+    headers: {
+      'X-API-Key': CONFIG.apiKey,
+      'Accept':    'application/json',
+    },
+  });
+
+  if (!res.ok) {
+    let detail = res.statusText;
+    try { detail = (await res.json()).detail || detail; } catch (_) {}
+    throw new Error(`API ${res.status}: ${detail}`);
+  }
+
+  return res.json();
+}
+
+/**
+ * Derive city_key from a city name.
+ * Mirrors backend logic in trigger_run:
+ *   f"{city_name.lower().replace(' ', '_')}_{country_or_region[:2].lower()}"
+ * Actual pipeline uses country[:2].lower() — "United States" → "un".
+ */
+function toCityKey(cityName) {
+  return `${cityName.toLowerCase().replace(/\s+/g, '_')}_un`;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// FIELD MAPPINGS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * DB entity_type  →  frontend display sector
+ *
+ * DB values:    investor | philanthropic | corporate | political | nonprofit |
+ *               executive_hnw | community_leader | politician | hnwi | illicit
+ * Display vals: investor | philanthropist | corporation | government | ngo |
+ *               hnwi | leader | illicit
+ */
+const ENTITY_TYPE_TO_SECTOR = {
+  investor:         'investor',
+  philanthropic:    'philanthropist',
+  corporate:        'corporation',
+  political:        'government',
+  nonprofit:        'ngo',
+  executive_hnw:    'hnwi',
+  community_leader: 'leader',
+  politician:       'government',
+  hnwi:             'hnwi',
+  illicit:          'illicit',
+};
+
+/**
+ * Derive display role from entity data.
+ *
+ * Priority:
+ *   1. Boolean candidate flags written by the Analysis & Scoring agent
+ *   2. Highest soft score above threshold (> 30/100)
+ *   3. Default fallback: 'support'
+ *
+ * Lens filter buttons map directly to these role strings.
+ */
+function deriveRole(entity) {
+  // Hard flags take priority — these are definitive analytical outputs
+  if (entity.blocker_candidate)    return 'blocker';
+  if (entity.partner_candidate)    return 'partner';
+  if (entity.competitor_candidate) return 'competitor';
+
+  // Soft inference from scores
+  const candidates = [
+    { role: 'investment', score: entity.score_investment_potential || 0 },
+    { role: 'recruit',    score: entity.score_recruiting_potential || 0 },
+    { role: 'support',    score: entity.score_supporter_potential  || 0 },
+  ];
+  const best = candidates.sort((a, b) => b.score - a.score)[0];
+  if (best.score > 30) return best.role;
+
+  return 'support';
+}
+
+/**
+ * X-axis: Capital Capacity Index.
+ * The entity schema stores 9 normalized scores (0–100) but no raw capital figure.
+ * score_partner_potential is the best proxy: it reflects the entity's overall
+ * resource and relationship value to a new entrant.
+ * Falls back to score_startup_relevance if partner score is unset.
+ */
+function deriveCapital(entity) {
+  return entity.score_partner_potential || entity.score_startup_relevance || 0;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// DATA LOAD ORCHESTRATION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+async function loadCity(cityName) {
+  if (state.loading) return;
+  setLoadingState(true, `Querying pipeline runs for "${cityName}"…`);
+
+  try {
+    const cityKey = toCityKey(cityName);
+
+    // Step 1 — Find latest run (prefer complete, fall back to partial) ─────────
+    let run = null;
+    for (const status of ['complete', 'partial']) {
+      const data = await apiFetch('/runs', { city_key: cityKey, status, limit: 1 });
+      if (Array.isArray(data) && data.length > 0) { run = data[0]; break; }
+    }
+
+    if (!run) {
+      setErrorState(
+        `No completed runs found for "${cityName}" (looked up as city_key="${cityKey}"). ` +
+        `Run the pipeline first, or verify the city name matches a run in Supabase.`
+      );
+      return;
+    }
+
+    state.run    = run;
+    state.runId  = run.run_id;
+    state.cityName = cityName;
+
+    // Step 2 — Load all entities (paginated at 200 per page) ─────────────────
+    setLoadingState(true, `Loading entities from run ${run.run_id.slice(0, 8)}…`);
+
+    const ENTITY_LIMIT = 200;
+    const allEntities  = [];
+    let offset = 0;
+
+    while (true) {
+      const data = await apiFetch('/entities', {
+        run_id: run.run_id,
+        limit:  ENTITY_LIMIT,
+        offset,
+      });
+      allEntities.push(...(data.entities || []));
+      const total = data.total || 0;
+      if (allEntities.length >= total || (data.entities || []).length < ENTITY_LIMIT) break;
+      offset += ENTITY_LIMIT;
+      setLoadingState(true, `Loading entities… ${allEntities.length} / ${total}`);
+    }
+
+    state.entities  = allEntities;
+    state.entityMap = Object.fromEntries(allEntities.map(e => [e.entity_id, e]));
+    // Detect whether the scoring agent has run — any entity with a non-zero score is enough
+    state.hasScores = allEntities.some(e =>
+      (e.score_influence || 0) > 0 || (e.score_partner_potential || 0) > 0 ||
+      (e.score_startup_relevance || 0) > 0
+    );
+
+    // Step 3 — Load all relationships ─────────────────────────────────────────
+    setLoadingState(true, `Loading relationship graph…`);
+    const relData       = await apiFetch(`/runs/${run.run_id}/relationships`);
+    state.relationships = relData.relationships || [];
+
+    // Step 4 — Render ─────────────────────────────────────────────────────────
+    renderAll();
+    setLoadingState(false);
+
+  } catch (err) {
+    setErrorState(err.message);
+    console.error('[OSINT Dashboard]', err);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// FILTERING
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function getFilteredEntities() {
+  const search = state.searchText;
+  return state.entities.filter(entity => {
+    const sector = ENTITY_TYPE_TO_SECTOR[entity.entity_type] || 'other';
+    const role   = deriveRole(entity);
+    return (
+      (state.activeLens === 'all'         || role === state.activeLens) &&
+      (state.activeSectorFilter === 'all' || sector === state.activeSectorFilter) &&
+      (!search ||
+        (entity.canonical_name  || '').toLowerCase().includes(search) ||
+        (entity.entity_type     || '').toLowerCase().includes(search) ||
+        (entity.entity_subtype  || '').toLowerCase().includes(search))
+    );
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// RENDER PIPELINE
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function renderAll() {
+  const filtered = getFilteredEntities();
+  updateTicker();
+  renderScatter(filtered);
+  renderRadar();
+  renderDirectory(filtered);
+}
+
+function updateTicker() {
+  const run = state.run;
+  if (!run) return;
+  document.getElementById('agentProcessed').innerText = state.entities.length;
+  document.getElementById('agentRelCount').innerText  = state.relationships.length;
+  const msgs = [
+    `${run.city_name} · Run ${run.run_id.slice(0, 8)} · Status: ${run.status}`,
+    `${state.entities.length} entities mapped · ${state.relationships.length} relationships traced`,
+    `Confidence: ${run.overall_confidence || 'N/A'} · Phase: ${run.current_phase || 'complete'}`,
+  ];
+  document.getElementById('agentActiveMessage').innerText =
+    msgs[Math.floor(Date.now() / 6000) % msgs.length];
+}
+
+// ── Scatter ──────────────────────────────────────────────────────────────────
+
+function renderScatter(filteredEntities) {
+  const noScoresEl = document.getElementById('scatterNoScores');
+  const countEl    = document.getElementById('scatterEntityCount');
+
+  if (!state.hasScores) {
+    if (noScoresEl) noScoresEl.classList.remove('hidden');
+    if (countEl) countEl.textContent = `${state.entities.length} entities`;
+    // Destroy stale chart so it doesn't bleed through the overlay
+    if (state.scatterChart) { state.scatterChart.destroy(); state.scatterChart = null; }
+    return;
+  }
+  if (noScoresEl) noScoresEl.classList.add('hidden');
+
+  const points = filteredEntities.map(e => ({
+    x:      deriveCapital(e),
+    y:      e.score_influence || 0,
+    id:     e.entity_id,
+    name:   e.canonical_name || 'Unknown',
+    sector: ENTITY_TYPE_TO_SECTOR[e.entity_type] || 'other',
+  }));
+  const colors = points.map(p => getSectorThemeColor(p.sector));
+
+  if (state.scatterChart) {
+    state.scatterChart.data.datasets[0].data            = points;
+    state.scatterChart.data.datasets[0].backgroundColor = colors;
+    state.scatterChart.update();
+  } else {
+    const ctx = document.getElementById('influenceScatterMap').getContext('2d');
+    state.scatterChart = new Chart(ctx, {
+      type: 'scatter',
+      data: { datasets: [{ data: points, backgroundColor: colors, pointRadius: 9, pointHoverRadius: 13 }] },
+      options: {
+        maintainAspectRatio: false,
+        scales: {
+          x: {
+            min: 0, max: 100,
+            title: { display: true, text: 'CAPITAL CAPACITY INDEX', color: '#475569', font: { size: 9, weight: 'bold' } },
+            grid:  { color: '#f1f0ea' },
+          },
+          y: {
+            min: 0, max: 100,
+            title: { display: true, text: 'NETWORK INFLUENCE SCORE', color: '#475569', font: { size: 9, weight: 'bold' } },
+            grid:  { color: '#f1f0ea' },
+          },
+        },
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            backgroundColor: 'rgba(15, 23, 42, 0.95)',
+            callbacks: { label: c => `${c.raw.name} [${c.raw.sector.toUpperCase()}]` },
+          },
+        },
+        onClick: (_e, els) => {
+          if (els.length > 0) {
+            loadDossier(state.scatterChart.data.datasets[0].data[els[0].index].id);
+          }
+        },
+      },
+    });
+  }
+}
+
+// ── Radar ────────────────────────────────────────────────────────────────────
+
+function renderRadar() {
+  const noScoresEl = document.getElementById('radarNoScores');
+  if (!state.hasScores) {
+    if (noScoresEl) noScoresEl.classList.remove('hidden');
+    if (state.radarChart) { state.radarChart.destroy(); state.radarChart = null; }
+    return;
+  }
+  if (noScoresEl) noScoresEl.classList.add('hidden');
+
+  /**
+   * Compute average score_influence per sector group across ALL entities
+   * (not just the filtered set) so the radar reflects the full ecosystem balance.
+   */
+  const groups = {
+    'Venture Investors':   ['investor'],
+    'Government & Policy': ['political', 'politician'],
+    'NGO/Foundations':     ['nonprofit', 'philanthropic'],
+    'Corporate Anchors':   ['corporate'],
+    'HNWI/Shadow Capital': ['hnwi', 'executive_hnw', 'illicit'],
+  };
+  const labels = Object.keys(groups);
+  const values = labels.map(label => {
+    const types    = groups[label];
+    const matching = state.entities.filter(e => types.includes(e.entity_type));
+    if (!matching.length) return 0;
+    return Math.round(matching.reduce((s, e) => s + (e.score_influence || 0), 0) / matching.length);
+  });
+
+  if (state.radarChart) {
+    state.radarChart.data.datasets[0].data = values;
+    state.radarChart.update();
+  } else {
+    const ctx = document.getElementById('sectorRadarMap').getContext('2d');
+    state.radarChart = new Chart(ctx, {
+      type: 'radar',
+      data: {
+        labels: labels.map(wrapLabel),
+        datasets: [{
+          data: values,
+          backgroundColor: 'rgba(13, 148, 136, 0.1)',
+          borderColor:     '#0d9488',
+          borderWidth:     2,
+          pointBackgroundColor: '#0d9488',
+        }],
+      },
+      options: {
+        maintainAspectRatio: false,
+        scales: {
+          r: {
+            min: 0, max: 100,
+            angleLines: { color: '#e5e3d8' },
+            grid:        { color: '#e5e3d8' },
+            ticks:       { display: false },
+            pointLabels: {
+              color: '#1a1a1a',
+              font: { family: 'Plus Jakarta Sans', size: 9, weight: '700' },
+            },
+          },
+        },
+        plugins: { legend: { display: false } },
+        layout: { padding: 5 },
+      },
+    });
+  }
+}
+
+// ── Directory ────────────────────────────────────────────────────────────────
+
+function renderDirectory(filteredEntities) {
+  const dir = document.getElementById('directoryList');
+  dir.innerHTML = '';
+
+  if (!filteredEntities.length) {
+    dir.innerHTML = `<div class="text-center py-8 text-xs text-slate-400">No entities match the current lens and filters.</div>`;
+    return;
+  }
+
+  // Sort descending by influence score
+  const sorted = [...filteredEntities].sort((a, b) => (b.score_influence || 0) - (a.score_influence || 0));
+
+  sorted.forEach(entity => {
+    const sector = ENTITY_TYPE_TO_SECTOR[entity.entity_type] || 'other';
+    const role   = deriveRole(entity);
+    const meta   = [entity.entity_subtype, entity.primary_city, entity.primary_state]
+                     .filter(Boolean).join(' · ') || entity.entity_type;
+
+    const el     = document.createElement('div');
+    el.className = 'p-3 bg-neutral-50 hover:bg-white border border-neutral-200 rounded-xl cursor-pointer hover:border-accent-teal transition-all flex justify-between items-center shadow-sm';
+    el.onclick   = () => loadDossier(entity.entity_id);
+    el.innerHTML = `
+      <div>
+        <div class="font-extrabold text-slate-950 text-xs">${escapeHtml(entity.canonical_name || 'Unknown')}</div>
+        <div class="text-[10px] text-slate-500 font-mono mt-0.5 uppercase tracking-wider">${escapeHtml(entity.entity_type)} &mdash; ${escapeHtml(meta)}</div>
+      </div>
+      <span class="text-[9px] font-mono font-bold uppercase px-2.5 py-1 rounded-md border ${getRoleClass(role)}">${role}</span>
+    `;
+    dir.appendChild(el);
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// DOSSIER — builds relationship strings from loaded edge data (no extra API call)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Relationship direction semantics:
+ *
+ *  FUNDED_BY           → source IS FUNDED BY target  (target provides capital)
+ *  RECEIVED_GRANT_FROM → source RECEIVED GRANT FROM target (target is grantor)
+ *  INVESTED_IN         → source INVESTED IN target   (source provides capital)
+ *  DONATED_TO          → source DONATED TO target    (source is donor)
+ *  AWARDED_CONTRACT_TO → source AWARDED CONTRACT TO target
+ *
+ * Influence types are directional: source influences / controls / employs target.
+ * We surface both sides (being influenced is still a relationship of note).
+ */
+const REL_CAPITAL_SOURCE_IS_TARGET  = new Set(['FUNDED_BY', 'RECEIVED_GRANT_FROM']);
+const REL_CAPITAL_SOURCE_IS_SOURCE  = new Set(['INVESTED_IN', 'DONATED_TO', 'AWARDED_CONTRACT_TO']);
+const REL_INFLUENCE = new Set([
+  'SITS_ON_BOARD_OF', 'REGULATORY_OVERSIGHT', 'POLITICALLY_CONNECTED_TO',
+  'FOUNDED', 'ADVISED_BY', 'WORKS_UNDER', 'EMPLOYED_BY',
+]);
+
+function loadDossier(entityId) {
+  const entity = state.entityMap[entityId];
+  if (!entity) return;
+
+  const role   = deriveRole(entity);
+  const sector = ENTITY_TYPE_TO_SECTOR[entity.entity_type] || 'other';
+  const rels   = state.relationships;
+  const eMap   = state.entityMap;
+
+  // Inbound capital: who provides money/grants TO this entity
+  const inboundNames = dedupe([
+    // This entity IS FUNDED BY target → target is the capital source
+    ...rels
+      .filter(r => r.source_entity_id === entityId && REL_CAPITAL_SOURCE_IS_TARGET.has(r.relationship_type))
+      .map(r => eMap[r.target_entity_id]?.canonical_name),
+    // Source entity INVESTED IN / donated to this entity → source is the capital source
+    ...rels
+      .filter(r => r.target_entity_id === entityId && REL_CAPITAL_SOURCE_IS_SOURCE.has(r.relationship_type))
+      .map(r => eMap[r.source_entity_id]?.canonical_name),
+  ].filter(Boolean));
+
+  // Outbound capital: who this entity provides money/grants TO
+  const outboundNames = dedupe([
+    // This entity INVESTED IN / donated to target → target receives
+    ...rels
+      .filter(r => r.source_entity_id === entityId && REL_CAPITAL_SOURCE_IS_SOURCE.has(r.relationship_type))
+      .map(r => eMap[r.target_entity_id]?.canonical_name),
+    // Target entity IS FUNDED BY this entity → this entity is the funder
+    ...rels
+      .filter(r => r.target_entity_id === entityId && REL_CAPITAL_SOURCE_IS_TARGET.has(r.relationship_type))
+      .map(r => eMap[r.source_entity_id]?.canonical_name),
+  ].filter(Boolean));
+
+  // Influence connections (bidirectional surface)
+  const influenceNames = dedupe([
+    ...rels
+      .filter(r => r.source_entity_id === entityId && REL_INFLUENCE.has(r.relationship_type))
+      .map(r => eMap[r.target_entity_id]?.canonical_name),
+    ...rels
+      .filter(r => r.target_entity_id === entityId && REL_INFLUENCE.has(r.relationship_type))
+      .map(r => eMap[r.source_entity_id]?.canonical_name),
+  ].filter(Boolean));
+
+  const playbookMap = {
+    partner:    'Execute partnership evaluation. Assess co-investment or strategic collaboration pathways. Validate alignment on ecosystem positioning and capital structure.',
+    competitor: 'Monitor deal flow and market positioning. Map overlapping target accounts and talent networks. Assess counter-strategy options.',
+    blocker:    'Identify leverage points and mitigation strategies. Assess regulatory, political, or financial exposure. Build compliance bridges early before engaging.',
+    investment: 'Evaluate investment thesis alignment. Trace capital structure, existing investor syndicates, and entry timing. Assess valuation floor and founder positioning.',
+    recruit:    'Map talent and advisory potential. Assess network access, domain expertise, and organizational loyalty vectors before approaching.',
+    support:    'Align narrative and mutual objectives. Identify long-term partnership vectors and resource-sharing opportunities with this ecosystem actor.',
+  };
+
+  // Render
+  document.getElementById('profileFallback').classList.add('hidden');
+  const content = document.getElementById('profileContent');
+  content.classList.remove('hidden');
+  content.classList.add('flex');
+
+  const meta = [entity.entity_subtype, entity.primary_city, entity.primary_state]
+    .filter(Boolean).join(' · ') || entity.entity_type;
+
+  document.getElementById('dossierName').innerText      = entity.canonical_name || 'Unknown';
+  document.getElementById('dossierMeta').innerText      = meta;
+  document.getElementById('dossierScore').innerText     = entity.score_influence || 0;
+  document.getElementById('dossierDesc').innerText      = entity.description || 'No description available in current dataset.';
+  document.getElementById('dossierPlaybook').innerText  = playbookMap[role] || playbookMap.support;
+  document.getElementById('dossierInbound').innerText   = inboundNames.length  ? inboundNames.slice(0, 3).join(', ')   : 'No capital inflow relationships mapped';
+  document.getElementById('dossierOutbound').innerText  = outboundNames.length ? outboundNames.slice(0, 3).join(', ')  : 'No capital outflow relationships mapped';
+  document.getElementById('dossierInfluences').innerText = influenceNames.length ? influenceNames.slice(0, 3).join(', ') : 'No influence connections mapped';
+
+  const secEl = document.getElementById('dossierSector');
+  secEl.innerText         = sector.toUpperCase();
+  secEl.style.borderColor = getSectorThemeColor(sector);
+  secEl.style.color       = getSectorThemeColor(sector);
+
+  const roleEl     = document.getElementById('dossierRole');
+  roleEl.innerText = role.toUpperCase();
+  roleEl.className = `text-[9px] font-mono font-bold uppercase tracking-wider px-2 py-0.5 rounded ${getRoleClass(role)}`;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// UI STATE HELPERS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function setLoadingState(loading, message = '') {
+  state.loading = loading;
+  const btn    = document.getElementById('runAssessmentBtn');
+  const ticker = document.getElementById('agentActiveMessage');
+  if (loading) {
+    ticker.innerText = message;
+    ticker.style.color = '';
+    btn.disabled = true;
+    btn.classList.add('opacity-50', 'cursor-not-allowed');
+  } else {
+    btn.disabled = false;
+    btn.classList.remove('opacity-50', 'cursor-not-allowed');
+  }
+}
+
+function setErrorState(message) {
+  state.loading = false;
+  document.getElementById('runAssessmentBtn').disabled = false;
+  document.getElementById('runAssessmentBtn').classList.remove('opacity-50', 'cursor-not-allowed');
+  const ticker = document.getElementById('agentActiveMessage');
+  ticker.innerText   = `Error: ${message}`;
+  ticker.style.color = '#fca5a5';
+  document.getElementById('agentProcessed').innerText = '—';
+  document.getElementById('agentRelCount').innerText  = '—';
+  document.getElementById('directoryList').innerHTML  =
+    `<div class="text-center py-8 text-xs text-rose-400">&#9888; ${escapeHtml(message)}</div>`;
+}
+
+function resetLensButtons() {
+  document.querySelectorAll('.lens-btn').forEach(b => {
+    b.className = 'lens-btn bg-neutral-50 hover:bg-neutral-100 text-neutral-800 border border-neutral-200 px-3 py-2.5 rounded-lg text-xs font-bold transition-all text-center';
+  });
+  const active = document.querySelector(`.lens-btn[data-lens="${state.activeLens}"]`);
+  if (active) active.className = 'lens-btn bg-slate-900 text-white border border-slate-950 px-3 py-2.5 rounded-lg text-xs font-bold shadow-sm transition-all text-center';
+}
+
+function resetSectorButtons() {
+  document.querySelectorAll('.sector-filter').forEach(b => {
+    b.className = 'sector-filter bg-neutral-50 text-neutral-800 text-[10px] font-bold px-2 py-1 rounded border border-neutral-200 hover:bg-neutral-100';
+  });
+  const active = document.querySelector(`.sector-filter[data-sector="${state.activeSectorFilter}"]`);
+  if (active) active.className = 'sector-filter bg-slate-900 text-white text-[10px] font-bold px-2 py-1 rounded border border-slate-950';
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// UTILITIES
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function escapeHtml(str) {
+  return String(str)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function dedupe(arr) { return [...new Set(arr)]; }
+
+function getSectorThemeColor(sector) {
+  return ({ investor:'#0d9488', philanthropist:'#0284c7', corporation:'#7c3aed',
+            government:'#b45309', ngo:'#059669', leader:'#475569',
+            hnwi:'#2563eb', illicit:'#be123c' })[sector] || '#64748b';
+}
+
+function getRoleClass(role) {
+  return ({ partner:'bg-emerald-50 text-emerald-700 border-emerald-200',
+            competitor:'bg-amber-50 text-amber-700 border-amber-200',
+            blocker:'bg-rose-50 text-rose-700 border-rose-200',
+            investment:'bg-blue-50 text-blue-700 border-blue-200',
+            support:'bg-teal-50 text-teal-700 border-teal-200',
+            recruit:'bg-purple-50 text-purple-700 border-purple-200' })[role]
+    || 'bg-slate-50 text-slate-700 border-slate-200';
+}
+
+function wrapLabel(str) {
+  if (str.length <= 16) return str;
+  const words = str.split(' '), lines = [];
+  let cur = '';
+  words.forEach(w => {
+    if ((cur + w).length > 16) { if (cur) lines.push(cur.trim()); cur = w + ' '; }
+    else cur += w + ' ';
+  });
+  if (cur) lines.push(cur.trim());
+  return lines;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// EVENT BINDINGS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+document.getElementById('runAssessmentBtn').addEventListener('click', () => {
+  const val = document.getElementById('cityInput').value.trim();
+  if (!val) return;
+
+  state.activeLens         = 'all';
+  state.activeSectorFilter = 'all';
+  state.searchText         = '';
+  document.getElementById('directorySearchInput').value = '';
+  document.getElementById('profileFallback').classList.remove('hidden');
+  document.getElementById('profileContent').classList.add('hidden');
+  document.getElementById('profileContent').classList.remove('flex');
+  document.getElementById('agentActiveMessage').style.color = '';
+  resetLensButtons();
+  resetSectorButtons();
+
+  loadCity(val);
+});
+
+document.querySelectorAll('.lens-btn').forEach(btn => {
+  btn.addEventListener('click', function () {
+    state.activeLens = this.dataset.lens;
+    resetLensButtons();
+    if (state.entities.length) { const f = getFilteredEntities(); renderScatter(f); renderDirectory(f); }
+  });
+});
+
+document.querySelectorAll('.sector-filter').forEach(btn => {
+  btn.addEventListener('click', function () {
+    state.activeSectorFilter = this.dataset.sector;
+    resetSectorButtons();
+    if (state.entities.length) { const f = getFilteredEntities(); renderScatter(f); renderDirectory(f); }
+  });
+});
+
+document.getElementById('directorySearchInput').addEventListener('input', function () {
+  state.searchText = this.value.toLowerCase().trim();
+  if (state.entities.length) { const f = getFilteredEntities(); renderScatter(f); renderDirectory(f); }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// STARTUP
+// ═══════════════════════════════════════════════════════════════════════════════
+
+window.addEventListener('DOMContentLoaded', () => {
+  if (!CONFIG.apiKey) {
+    document.getElementById('configWarning').classList.remove('hidden');
+  }
+  // Rotate ticker message every 6 seconds while a run is loaded
+  setInterval(() => { if (state.run && !state.loading) updateTicker(); }, 6000);
+});
+</script>
+</body>
+</html>

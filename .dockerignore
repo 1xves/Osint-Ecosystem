@@ -1,0 +1,51 @@
+# ─── Docker build context exclusions ──────────────────────────────────────────
+# Keep the image lean and prevent secrets from leaking into the build context.
+
+# Secrets — never include in image
+.env
+.env.*
+*.env
+
+# Python artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Dev tooling
+.venv/
+venv/
+.tox/
+.mypy_cache/
+.ruff_cache/
+
+# Local scratch files
+.pypkg/
+.tmp_node/
+.tmp_pgmod/
+.npm_cache/
+
+# Logs / output
+*.log
+logs/
+
+# Test artifacts
+tests/
+conftest.py
+
+# Git
+.git/
+.gitignore
+
+# Docs / planning
+*.md
+deploy/
+
+# OS
+.DS_Store
+Thumbs.db

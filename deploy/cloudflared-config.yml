@@ -1,0 +1,26 @@
+# deploy/cloudflared-config.yml
+#
+# Cloudflare Tunnel config for OSINT API
+# Routes api.vk-osint.com → FastAPI container (service name: api, port 8000)
+#
+# Used by the cloudflared Docker service in docker-compose.yml.
+# The credentials file is mounted as a Docker secret/volume — see compose file.
+#
+# Tunnel UUID: 1ed096ee-50d9-4ad1-b9c8-255aeccd28a4
+# Created with: cloudflared tunnel create osint-api
+#
+# On the VPS, copy the tunnel credentials JSON to:
+#   /opt/osint/.cloudflared/1ed096ee-50d9-4ad1-b9c8-255aeccd28a4.json
+# and update CLOUDFLARED_CREDS_DIR in .env to match.
+# ─────────────────────────────────────────────────
+
+tunnel: 1ed096ee-50d9-4ad1-b9c8-255aeccd28a4
+credentials-file: /Users/ves/.cloudflared/1ed096ee-50d9-4ad1-b9c8-255aeccd28a4.json
+
+ingress:
+  - hostname: api.finitebuilds.com
+    service: http://127.0.0.1:8080
+    originRequest:
+      connectTimeout: 30s
+      noTLSVerify: false
+  - service: http_status:404
