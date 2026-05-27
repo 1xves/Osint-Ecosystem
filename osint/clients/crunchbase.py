@@ -76,6 +76,9 @@ class CrunchbaseClient:
                 "funding_total", "last_funding_type", "num_employees_enum",
                 "rank_org", "website_url", "linkedin", "twitter",
                 "crunchbase_id", "categories", "category_groups",
+                # Relationship fields — Basic tier may return empty; fail-safe in corporate.py
+                "founder_identifiers",  # → corporate.category_fields["founder_names"]
+                "investors",            # → corporate.category_fields["investors_list"]
             ],
             "predicate_values": predicate_values,
             "limit": limit,

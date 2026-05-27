@@ -1,3 +1,24 @@
+# Secrets — never commit
 .env
+.env.*
+*.env
+
+# Python artifacts
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+
+# Dev scratch
+.pypkg/
+.tmp_node/
+.tmp_pgmod/
+.npm_cache/
+
+# OS
+.DS_Store
+Thumbs.db

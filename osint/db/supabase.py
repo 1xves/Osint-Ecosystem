@@ -26,6 +26,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
+import asyncio
 import asyncpg
 
 from osint.core.config import settings
@@ -960,6 +961,361 @@ class SupabaseClient:
                 f"SELECT COUNT(*) FROM entities WHERE {where_clause}",
                 *params,
             )
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # City-centric read methods — Intelligence API layer
+    #
+    # These methods abstract away run_id entirely. The caller works with
+    # city_key; run_id is resolved internally and never returned to callers.
+    #
+    # "Latest completed run" = most recent run with status IN ('complete',
+    # 'partial'), ordered by completed_at DESC. Partial runs are included
+    # because they may have a valid briefing and substantial entity data —
+    # excluding them would leave a city dark when a single agent failed.
+    # ─────────────────────────────────────────────────────────────────────────
+
+    async def get_latest_completed_run_for_city(
+        self, city_key: str
+    ) -> dict[str, Any] | None:
+        """
+        Resolve a city_key to its most recently completed run record.
+
+        Returns the full run dict (including run_id) for internal use by other
+        city-centric methods. run_id must NOT be surfaced to API callers.
+        Returns None if no completed or partial run exists for this city.
+        """
+        pool = self._pool_required()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT
+                    run_id, city_name, country_or_region, city_key,
+                    completed_at, overall_confidence,
+                    total_entities_found, total_relationships_found,
+                    total_claims_verified, gap_fill_triggered, run_status
+                FROM agent_runs
+                WHERE city_key = $1
+                  AND run_status IN ('complete', 'partial')
+                  AND completed_at IS NOT NULL
+                ORDER BY completed_at DESC NULLS LAST
+                LIMIT 1
+                """,
+                city_key,
+            )
+            return dict(row) if row else None
+
+    async def list_cities_with_intelligence(self) -> list[dict[str, Any]]:
+        """
+        List all distinct cities that have at least one completed or partial run.
+
+        Returns one record per city (most recently completed run's metadata).
+        Does NOT expose run_id in output.
+
+        Used by GET /cities.
+        """
+        pool = self._pool_required()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT DISTINCT ON (city_key)
+                    city_key,
+                    city_name,
+                    country_or_region,
+                    completed_at           AS data_as_of,
+                    overall_confidence,
+                    total_entities_found,
+                    total_relationships_found
+                FROM agent_runs
+                WHERE run_status IN ('complete', 'partial')
+                  AND completed_at IS NOT NULL
+                ORDER BY city_key, completed_at DESC NULLS LAST
+                """
+            )
+            return [dict(r) for r in rows]
+
+    async def get_city_overview(self, city_key: str) -> dict[str, Any] | None:
+        """
+        Return a complete summary of intelligence available for a city.
+
+        Performs two concurrent queries after resolving the run:
+          1. Entity aggregate: total count, per-type breakdown, flag counts
+          2. Relationship count
+
+        Returns None if no completed run exists.
+        run_id is NOT included in the returned dict.
+
+        Used by GET /cities/{city_key}.
+        """
+        run = await self.get_latest_completed_run_for_city(city_key)
+        if not run:
+            return None
+
+        run_id = str(run["run_id"])
+        pool = self._pool_required()
+
+        async with pool.acquire() as conn:
+            entity_rows, rel_row = await asyncio.gather(
+                conn.fetch(
+                    """
+                    SELECT
+                        entity_type,
+                        COUNT(*)                                              AS n,
+                        COUNT(*) FILTER (WHERE partner_candidate    = TRUE)   AS partners,
+                        COUNT(*) FILTER (WHERE blocker_candidate    = TRUE)   AS blockers,
+                        COUNT(*) FILTER (WHERE top_influencer       = TRUE)   AS influencers,
+                        COUNT(*) FILTER (WHERE investment_candidate = TRUE)   AS investments,
+                        COUNT(*) FILTER (WHERE competitor_candidate = TRUE)   AS competitors
+                    FROM entities
+                    WHERE $1::uuid = ANY(source_run_ids)
+                      AND valid_to IS NULL
+                    GROUP BY entity_type
+                    """,
+                    run_id,
+                ),
+                conn.fetchrow(
+                    """
+                    SELECT COUNT(*) AS n
+                    FROM relationships
+                    WHERE run_id = $1::uuid
+                    """,
+                    run_id,
+                ),
+            )
+
+        by_type: dict[str, int] = {}
+        flag_totals = {
+            "partner_candidates":    0,
+            "blocker_candidates":    0,
+            "top_influencers":       0,
+            "investment_candidates": 0,
+            "competitor_candidates": 0,
+        }
+        total_entities = 0
+        for row in entity_rows:
+            by_type[row["entity_type"]] = row["n"]
+            total_entities                       += row["n"]
+            flag_totals["partner_candidates"]    += row["partners"]
+            flag_totals["blocker_candidates"]    += row["blockers"]
+            flag_totals["top_influencers"]       += row["influencers"]
+            flag_totals["investment_candidates"] += row["investments"]
+            flag_totals["competitor_candidates"] += row["competitors"]
+
+        return {
+            "city_key":           city_key,
+            "city_name":          run["city_name"],
+            "country_or_region":  run["country_or_region"],
+            "data_as_of":         run["completed_at"],
+            "overall_confidence": run["overall_confidence"],
+            "entity_counts": {
+                "total":   total_entities,
+                "by_type": by_type,
+            },
+            "relationship_count": rel_row["n"] if rel_row else 0,
+            **flag_totals,
+        }
+
+    async def get_city_entities(
+        self,
+        city_key: str,
+        entity_type: str | None = None,
+        flag: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """
+        Return presentation-ready entities for a city's latest completed run.
+
+        Strips all pipeline-internal fields: source_run_ids, merge_provenance,
+        source_agent, needs_review, sensitivity_tier, proxycurl_* columns.
+
+        Args:
+            city_key:    Normalized city identifier, e.g. 'philadelphia_us'
+            entity_type: Optional — one of the 10 collection types
+            flag:        Optional — one of: partner_candidate, blocker_candidate,
+                         top_influencer, investment_candidate, competitor_candidate,
+                         recruiter_candidate, support_candidate
+            limit:       Max records returned (capped at 200)
+            offset:      Pagination offset
+        """
+        pool = self._pool_required()
+        limit = min(limit, 200)
+
+        run = await self.get_latest_completed_run_for_city(city_key)
+        if not run:
+            return []
+        run_id = str(run["run_id"])
+
+        # Whitelist guard — flag is interpolated directly into SQL as a column
+        # name, so it must be validated before use. asyncpg parameterization
+        # cannot be used for column name substitution.
+        _VALID_FLAGS = frozenset({
+            "partner_candidate", "blocker_candidate", "top_influencer",
+            "investment_candidate", "competitor_candidate",
+            "recruiter_candidate", "support_candidate",
+        })
+
+        conditions: list[str] = [
+            "$1::uuid = ANY(source_run_ids)",
+            "valid_to IS NULL",
+        ]
+        params: list[Any] = [run_id]
+        param_idx = 2
+
+        if entity_type:
+            conditions.append(f"entity_type = ${param_idx}")
+            params.append(entity_type)
+            param_idx += 1
+
+        if flag and flag in _VALID_FLAGS:
+            conditions.append(f"{flag} = TRUE")
+
+        where_clause = " AND ".join(conditions)
+        params.extend([limit, offset])
+
+        query = f"""
+            SELECT
+                entity_id, canonical_name, entity_type, entity_subtype,
+                aliases,
+                primary_city, primary_state, primary_country,
+                website_url, linkedin_url,
+                description,
+                overall_confidence, source_count, corroboration_count,
+                last_verified,
+                partner_candidate, competitor_candidate, blocker_candidate,
+                investment_candidate, support_candidate, recruiter_candidate,
+                top_influencer,
+                score_influence,        score_startup_relevance,
+                score_partner_potential, score_supporter_potential,
+                score_competitor_potential, score_blocker_risk,
+                score_investment_potential, score_support_target,
+                score_recruiting_potential,
+                category_fields,
+                created_at
+            FROM entities
+            WHERE {where_clause}
+            ORDER BY score_influence DESC NULLS LAST, canonical_name ASC
+            LIMIT ${param_idx} OFFSET ${param_idx + 1}
+        """
+
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(query, *params)
+            return [dict(r) for r in rows]
+
+    async def count_city_entities(
+        self,
+        city_key: str,
+        entity_type: str | None = None,
+        flag: str | None = None,
+    ) -> int:
+        """
+        Count entities for a city matching optional type and flag filters.
+        Used for pagination totals on GET /cities/{city_key}/entities.
+        """
+        pool = self._pool_required()
+
+        run = await self.get_latest_completed_run_for_city(city_key)
+        if not run:
+            return 0
+        run_id = str(run["run_id"])
+
+        _VALID_FLAGS = frozenset({
+            "partner_candidate", "blocker_candidate", "top_influencer",
+            "investment_candidate", "competitor_candidate",
+            "recruiter_candidate", "support_candidate",
+        })
+
+        conditions: list[str] = [
+            "$1::uuid = ANY(source_run_ids)",
+            "valid_to IS NULL",
+        ]
+        params: list[Any] = [run_id]
+        param_idx = 2
+
+        if entity_type:
+            conditions.append(f"entity_type = ${param_idx}")
+            params.append(entity_type)
+            param_idx += 1
+
+        if flag and flag in _VALID_FLAGS:
+            conditions.append(f"{flag} = TRUE")
+
+        where_clause = " AND ".join(conditions)
+        async with pool.acquire() as conn:
+            return await conn.fetchval(
+                f"SELECT COUNT(*) FROM entities WHERE {where_clause}",
+                *params,
+            )
+
+    async def get_city_relationships(
+        self,
+        city_key: str,
+        verified_only: bool = False,
+    ) -> list[dict[str, Any]]:
+        """
+        Return relationships for a city's latest completed run.
+
+        Joins entity canonical_name and entity_type onto each edge so the
+        frontend can render the graph without a second lookup per entity.
+
+        Strips pipeline-internal fields: evidence_ids, evidence_snippets,
+        neo4j_synced, neo4j_synced_at, run_id.
+
+        Join note: does NOT filter entity join on valid_to IS NULL because
+        entity_id is the primary key — one row per UUID regardless of
+        supersession status. Filtering on valid_to would silently drop
+        relationships whose source/target entity was later superseded.
+        """
+        pool = self._pool_required()
+
+        run = await self.get_latest_completed_run_for_city(city_key)
+        if not run:
+            return []
+        run_id = str(run["run_id"])
+
+        verified_clause = "AND r.verified = TRUE" if verified_only else ""
+
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"""
+                SELECT
+                    r.relationship_id,
+                    r.source_entity_id,
+                    src.canonical_name  AS source_name,
+                    src.entity_type     AS source_type,
+                    r.target_entity_id,
+                    tgt.canonical_name  AS target_name,
+                    tgt.entity_type     AS target_type,
+                    r.relationship_type,
+                    r.direction,
+                    r.confidence,
+                    r.confidence_score,
+                    r.relationship_strength,
+                    r.verified,
+                    r.valid_from,
+                    r.valid_to,
+                    r.created_at
+                FROM relationships r
+                JOIN entities src ON src.entity_id = r.source_entity_id
+                JOIN entities tgt ON tgt.entity_id = r.target_entity_id
+                WHERE r.run_id = $1::uuid
+                {verified_clause}
+                ORDER BY r.relationship_strength DESC NULLS LAST,
+                         r.confidence DESC
+                """,
+                run_id,
+            )
+            return [dict(r) for r in rows]
+
+    async def get_city_briefing(self, city_key: str) -> dict[str, Any] | None:
+        """
+        Return the briefing for a city's latest completed run.
+        Delegates to get_briefing() after resolving city_key → run_id.
+        Returns None if no completed run or no briefing was generated.
+        """
+        run = await self.get_latest_completed_run_for_city(city_key)
+        if not run:
+            return None
+        return await self.get_briefing(str(run["run_id"]))
 
     # ─────────────────────────────────────────────────────────────────────────
     # osint_search_records table

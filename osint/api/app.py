@@ -35,16 +35,20 @@ Running:
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import re
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import orjson
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from osint.core.config import settings
@@ -148,22 +152,49 @@ async def lifespan(app: FastAPI):
     redis = RedisClient()
     ollama = OllamaClient()
 
-    # Connect — errors here are fatal (app should not start without DB)
+    # Supabase — fatal: all read endpoints require it
     await db.connect()
-    await neo4j.connect()
-    await redis.connect()
-    await ollama.connect()
 
-    # ChromaDB is only used by the resolution agent — non-fatal if unavailable at startup
+    # Neo4j — non-fatal: only used by pipeline agents, not by API read endpoints
+    try:
+        await neo4j.connect()
+        log.info("API startup: Neo4j connected")
+    except Exception as exc:
+        log.warning("API startup: Neo4j unavailable (%s) — graph features will degrade gracefully", exc)
+
+    # Redis — non-fatal: used for rate limiting and ARQ queue; API read endpoints work without it
+    try:
+        await redis.connect()
+        log.info("API startup: Redis connected")
+    except Exception as exc:
+        log.warning("API startup: Redis unavailable (%s) — rate limiting and job queue will be unavailable", exc)
+
+    # Ollama — non-fatal: used by LLM routing, not by API read endpoints
+    try:
+        await ollama.connect()
+        log.info("API startup: Ollama connected")
+    except Exception as exc:
+        log.warning("API startup: Ollama unavailable (%s) — LLM features will degrade gracefully", exc)
+
+    # ChromaDB — non-fatal: only used by the resolution agent
     try:
         await chroma.connect()
         log.info("API startup: ChromaDB connected")
     except Exception as exc:
         log.warning("API startup: ChromaDB unavailable (%s) — resolution agent will degrade gracefully", exc)
 
-    # Dependents require connected clients — init after connect
-    rate_limiter = RateLimiter(redis.get_raw_client())
-    llm = LLMRouter(ollama)
+    # Dependents — non-fatal if their backing service is unavailable
+    try:
+        rate_limiter = RateLimiter(redis.get_raw_client())
+    except Exception as exc:
+        log.warning("API startup: RateLimiter unavailable (%s)", exc)
+        rate_limiter = None
+
+    try:
+        llm = LLMRouter(ollama)
+    except Exception as exc:
+        log.warning("API startup: LLMRouter unavailable (%s)", exc)
+        llm = None
 
     # Store on app.state for access in route handlers
     app.state.db           = db
@@ -217,11 +248,30 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],        # tighten in production
+    allow_origins=[
+        "https://vk-osint.com",
+        "https://www.vk-osint.com",
+        "https://api.vk-osint.com",
+        # Local dev — remove before production if not needed
+        "http://localhost:3000",
+        "http://localhost:8080",
+    ],
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["X-API-Key", "Accept", "Content-Type"],
 )
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Static files — dashboard frontend
+# Resolved relative to this file: osint/api/app.py → ../../.. → project root
+# ─────────────────────────────────────────────────────────────────────────────
+
+_STATIC_DIR = Path(__file__).resolve().parent.parent.parent / "static"
+
+if _STATIC_DIR.exists():
+    # Mount /static/... so the HTML can reference relative asset paths if needed.
+    # The root GET / handler below serves index.html directly.
+    app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -258,6 +308,21 @@ async def health() -> dict[str, Any]:
         "arq_queue":  "connected" if app.state.arq_pool else "unavailable",
         "timestamp":  datetime.now(timezone.utc).isoformat(),
     }
+
+
+@app.get("/", include_in_schema=False)
+async def serve_frontend() -> FileResponse:
+    """
+    Serve the dashboard frontend (static/index.html). No auth required —
+    the page is public; the API calls it makes require X-API-Key.
+    """
+    index = _STATIC_DIR / "index.html"
+    if not index.exists():
+        raise HTTPException(
+            status_code=404,
+            detail="Frontend not found — ensure static/index.html exists in the project root.",
+        )
+    return FileResponse(index, media_type="text/html")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -597,6 +662,291 @@ async def get_entity(entity_id: str) -> dict[str, Any]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Cities — Intelligence API
+#
+# These routes are the frontend-facing surface. They expose intelligence data
+# by city, with no concept of runs, agents, or pipeline internals visible to
+# the caller. run_id resolution happens entirely inside SupabaseClient.
+#
+# All five routes require X-API-Key auth — same as the pipeline API.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Valid entity types — kept here as a constant to avoid drift from the schema.
+_ENTITY_TYPES = frozenset({
+    "investor", "philanthropic", "corporate", "political",
+    "nonprofit", "executive_hnw", "community_leader",
+    "politician", "hnwi", "illicit",
+})
+
+# Valid classification flags for entity filtering.
+_ENTITY_FLAGS = frozenset({
+    "partner_candidate", "blocker_candidate", "top_influencer",
+    "investment_candidate", "competitor_candidate",
+    "recruiter_candidate", "support_candidate",
+})
+
+
+@app.get(
+    "/cities",
+    tags=["cities"],
+    dependencies=[Depends(require_api_key)],
+)
+async def list_cities() -> dict[str, Any]:
+    """
+    List all cities that have completed intelligence data.
+
+    Returns one entry per city — its most recently completed run's metadata.
+    Cities with only pending or failed runs are NOT included.
+
+    Response fields per city:
+        city_key          — normalized identifier, e.g. 'philadelphia_us'
+        city_name         — display name, e.g. 'Philadelphia'
+        country_or_region
+        data_as_of        — ISO timestamp of when the latest run completed
+        overall_confidence — high | medium | low | null
+        entity_count      — total entities collected
+        relationship_count — total relationships mapped
+    """
+    db: SupabaseClient = app.state.db
+    cities = await db.list_cities_with_intelligence()
+    return {
+        "count":  len(cities),
+        "cities": [_serialize_city_meta(c) for c in cities],
+    }
+
+
+@app.get(
+    "/cities/{city_key}",
+    tags=["cities"],
+    dependencies=[Depends(require_api_key)],
+)
+async def get_city(city_key: str) -> dict[str, Any]:
+    """
+    Return an intelligence overview for a city.
+
+    Includes entity counts broken down by type, relationship count,
+    and counts of actionable classifications (partner candidates,
+    blockers, top influencers, investment candidates, competitors).
+
+    Returns 404 if the city has no completed intelligence data.
+    """
+    _validate_city_key(city_key)
+    db: SupabaseClient = app.state.db
+    overview = await db.get_city_overview(city_key)
+    if not overview:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No completed intelligence found for city '{city_key}'. "
+                   f"Run must have status 'complete' or 'partial'.",
+        )
+    return _serialize_city_overview(overview)
+
+
+@app.get(
+    "/cities/{city_key}/entities",
+    tags=["cities"],
+    dependencies=[Depends(require_api_key)],
+)
+async def get_city_entities(
+    city_key: str,
+    entity_type: str | None = Query(
+        default=None,
+        description=(
+            "Filter by entity type: investor | philanthropic | corporate | political | "
+            "nonprofit | executive_hnw | community_leader | politician | hnwi | illicit"
+        ),
+    ),
+    flag: str | None = Query(
+        default=None,
+        description=(
+            "Filter to entities with a specific classification flag set to true: "
+            "partner_candidate | blocker_candidate | top_influencer | "
+            "investment_candidate | competitor_candidate | recruiter_candidate | "
+            "support_candidate"
+        ),
+    ),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    """
+    Return entities for a city, sorted by influence score descending.
+
+    Filters:
+        entity_type — restrict to one category of actor
+        flag        — restrict to entities flagged as a specific classification
+
+    Both filters are optional and combinable (e.g. investors who are also
+    partner candidates).
+
+    Returns 404 if the city has no completed intelligence data.
+    Returns 400 if entity_type or flag values are not recognized.
+
+    Pipeline-internal fields (run IDs, agent names, review flags, cost tracking)
+    are stripped from all entity records in this response.
+    """
+    _validate_city_key(city_key)
+
+    if entity_type and entity_type not in _ENTITY_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown entity_type '{entity_type}'. "
+                   f"Valid values: {sorted(_ENTITY_TYPES)}",
+        )
+    if flag and flag not in _ENTITY_FLAGS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown flag '{flag}'. "
+                   f"Valid values: {sorted(_ENTITY_FLAGS)}",
+        )
+
+    db: SupabaseClient = app.state.db
+
+    # Confirm city exists before running the paginated query.
+    run = await db.get_latest_completed_run_for_city(city_key)
+    if not run:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No completed intelligence found for city '{city_key}'.",
+        )
+
+    entities, total = await asyncio.gather(
+        db.get_city_entities(
+            city_key=city_key,
+            entity_type=entity_type,
+            flag=flag,
+            limit=limit,
+            offset=offset,
+        ),
+        db.count_city_entities(
+            city_key=city_key,
+            entity_type=entity_type,
+            flag=flag,
+        ),
+    )
+
+    return {
+        "city_key":    city_key,
+        "total":       total,
+        "limit":       limit,
+        "offset":      offset,
+        "entity_type": entity_type,
+        "flag":        flag,
+        "entities":    [_serialize_city_entity(e) for e in entities],
+    }
+
+
+@app.get(
+    "/cities/{city_key}/relationships",
+    tags=["cities"],
+    dependencies=[Depends(require_api_key)],
+)
+async def get_city_relationships(
+    city_key: str,
+    verified_only: bool = Query(
+        default=False,
+        description="If true, return only relationships that passed verification.",
+    ),
+) -> dict[str, Any]:
+    """
+    Return the relationship graph for a city.
+
+    Each edge includes the canonical name and type of both endpoints, so the
+    graph can be rendered without a secondary entity lookup.
+
+    Fields per relationship:
+        relationship_id, source_entity_id, source_name, source_type,
+        target_entity_id, target_name, target_type,
+        relationship_type, direction, confidence, confidence_score,
+        relationship_strength, verified, valid_from, valid_to
+
+    Pipeline-internal fields (run_id, evidence_ids, neo4j sync state) are
+    not included.
+
+    Returns 404 if the city has no completed intelligence data.
+    """
+    _validate_city_key(city_key)
+    db: SupabaseClient = app.state.db
+
+    run = await db.get_latest_completed_run_for_city(city_key)
+    if not run:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No completed intelligence found for city '{city_key}'.",
+        )
+
+    relationships = await db.get_city_relationships(
+        city_key=city_key,
+        verified_only=verified_only,
+    )
+    return {
+        "city_key":      city_key,
+        "verified_only": verified_only,
+        "count":         len(relationships),
+        "relationships": [_serialize_record(r) for r in relationships],
+    }
+
+
+@app.get(
+    "/cities/{city_key}/briefing",
+    tags=["cities"],
+    dependencies=[Depends(require_api_key)],
+)
+async def get_city_briefing(
+    city_key: str,
+    format: str = Query(
+        default="json",
+        pattern="^(json|markdown)$",
+        description="Response format: json (default) or markdown",
+    ),
+) -> Any:
+    """
+    Return the intelligence briefing for a city.
+
+    The briefing is the final output of the pipeline — a structured,
+    multi-section document covering ecosystem overview, key players,
+    capital networks, political landscape, risk signals, and more.
+
+    Query params:
+        format=json      → full structured briefing as JSON
+        format=markdown  → same content rendered as markdown text
+
+    Returns 404 if the city has no completed intelligence or no briefing
+    was generated (possible for partial runs that failed late).
+    """
+    _validate_city_key(city_key)
+    db: SupabaseClient = app.state.db
+
+    run = await db.get_latest_completed_run_for_city(city_key)
+    if not run:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No completed intelligence found for city '{city_key}'.",
+        )
+
+    briefing = await db.get_city_briefing(city_key)
+    if not briefing:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"No briefing found for city '{city_key}'. "
+                f"The run completed but the briefing agent may not have finished."
+            ),
+        )
+
+    if format == "markdown":
+        try:
+            from osint.agents.briefing import _render_markdown
+            md = _render_markdown(briefing) if briefing.get("sections") else (
+                "(Briefing markdown not available — use format=json.)"
+            )
+        except Exception:
+            md = "(Markdown rendering unavailable — use format=json.)"
+        return PlainTextResponse(content=md, media_type="text/markdown")
+
+    return ORJSONResponse(content=briefing)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -634,3 +984,93 @@ def _serialize_run(run: dict[str, Any]) -> dict[str, Any]:
     # Rename run_status → status for cleaner API contract
     serialized["status"] = serialized.pop("run_status", None)
     return serialized
+
+
+# ── City-specific serializers ─────────────────────────────────────────────────
+
+# city_key format: lowercase alphanumeric + underscores only.
+# e.g. "philadelphia_us", "new_york_us", "san_francisco_us"
+# Length cap at 64 prevents abuse; min 3 rules out trivial inputs.
+_CITY_KEY_RE = re.compile(r"^[a-z0-9_]{3,64}$")
+
+
+def _validate_city_key(city_key: str) -> None:
+    """
+    Raise 400 if city_key contains characters outside [a-z0-9_] or is
+    outside the length range 3–64.
+
+    city_key is interpolated into SQL via asyncpg parameterization (safe),
+    but we validate format here to return a clear error before hitting the DB.
+    """
+    if not _CITY_KEY_RE.match(city_key):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Invalid city_key '{city_key}'. "
+                f"Must be lowercase alphanumeric and underscores only, "
+                f"3–64 characters (e.g. 'philadelphia_us')."
+            ),
+        )
+
+
+def _serialize_city_meta(city: dict[str, Any]) -> dict[str, Any]:
+    """
+    Serialize a city list entry from list_cities_with_intelligence().
+
+    Renames DB column names to clean API names and handles datetime → ISO.
+    """
+    return {
+        "city_key":          city.get("city_key"),
+        "city_name":         city.get("city_name"),
+        "country_or_region": city.get("country_or_region"),
+        "data_as_of":        city["data_as_of"].isoformat() if city.get("data_as_of") else None,
+        "overall_confidence": city.get("overall_confidence"),
+        "entity_count":      city.get("total_entities_found", 0),
+        "relationship_count": city.get("total_relationships_found", 0),
+    }
+
+
+def _serialize_city_overview(overview: dict[str, Any]) -> dict[str, Any]:
+    """
+    Serialize the output of get_city_overview().
+
+    data_as_of is a datetime from asyncpg — convert to ISO string.
+    All other fields are already JSON-safe (str, int, dict).
+    """
+    out = dict(overview)
+    if isinstance(out.get("data_as_of"), datetime):
+        out["data_as_of"] = out["data_as_of"].isoformat()
+    return out
+
+
+def _serialize_city_entity(entity: dict[str, Any]) -> dict[str, Any]:
+    """
+    Serialize an entity record from get_city_entities().
+
+    Handles: datetime → ISO string, UUID → str, JSONB string → parsed dict.
+
+    asyncpg returns JSONB columns as raw JSON strings, not Python dicts.
+    category_fields must be parsed before the response is serialized to JSON,
+    otherwise the client receives a double-encoded string.
+    """
+    import json as _json
+
+    out: dict[str, Any] = {}
+    for k, v in entity.items():
+        if v is None:
+            out[k] = None
+        elif isinstance(v, datetime):
+            out[k] = v.isoformat()
+        elif hasattr(v, "hex"):  # UUID from asyncpg
+            out[k] = str(v)
+        elif isinstance(v, (list, tuple)):
+            out[k] = [str(i) if hasattr(i, "hex") else i for i in v]
+        elif isinstance(v, str) and k == "category_fields":
+            # JSONB comes back as a raw JSON string from asyncpg
+            try:
+                out[k] = _json.loads(v)
+            except (ValueError, TypeError):
+                out[k] = {}
+        else:
+            out[k] = v
+    return out

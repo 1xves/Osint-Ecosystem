@@ -260,6 +260,31 @@ class CorporateAgent(BaseAgent):
             ipo_status = props.get("ipo_status", "")
             subtype = self._infer_corporate_subtype(props, employee_count, ipo_status)
 
+            # ── Relationship fields (Basic tier may omit — always fail-safe) ──────
+            # founder_identifiers: list of {value, permalink} OR {identifier: {value}}
+            raw_founders = props.get("founder_identifiers") or []
+            if not isinstance(raw_founders, list):
+                raw_founders = []
+            founder_names: list[str] = []
+            for f in raw_founders:
+                if not isinstance(f, dict):
+                    continue
+                name = f.get("value") or f.get("identifier", {}).get("value", "")
+                if name:
+                    founder_names.append(name)
+
+            # investors: list of {identifier: {value, permalink}, lead_investor}
+            raw_investors = props.get("investors") or []
+            if not isinstance(raw_investors, list):
+                raw_investors = []
+            investors_list: list[str] = []
+            for inv in raw_investors:
+                if not isinstance(inv, dict):
+                    continue
+                name = inv.get("identifier", {}).get("value", "") or inv.get("value", "")
+                if name:
+                    investors_list.append(name)
+
             category_fields: dict[str, Any] = {
                 "corporate_subtype": subtype,
                 "corporate_subtype_status": "REPORTED",
@@ -271,6 +296,9 @@ class CorporateAgent(BaseAgent):
                 "total_funding": props.get("funding_total", {}).get("value_usd"),
                 "total_funding_status": "REPORTED" if props.get("funding_total") else "NOT_COLLECTED",
                 "founded_year": props.get("founded_on", {}).get("value", "")[:4] if props.get("founded_on") else None,
+                # Relationship fields — populated if Crunchbase Basic returns them; None otherwise
+                "founder_names": founder_names if founder_names else None,
+                "investors_list": investors_list if investors_list else None,
             }
 
             entity: dict[str, Any] = {

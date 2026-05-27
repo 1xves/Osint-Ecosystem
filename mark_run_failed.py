@@ -42,8 +42,8 @@ async def main(run_id_prefix: str) -> None:
     try:
         # Find the run — accept partial prefix for convenience
         rows = await conn.fetch(
-            "SELECT run_id, city_name, status, created_at FROM runs "
-            "WHERE run_id::text LIKE $1 ORDER BY created_at DESC LIMIT 5",
+            "SELECT run_id, city_name, run_status, started_at FROM agent_runs "
+            "WHERE run_id::text LIKE $1 ORDER BY started_at DESC LIMIT 5",
             f"{run_id_prefix}%",
         )
 
@@ -54,7 +54,7 @@ async def main(run_id_prefix: str) -> None:
         if len(rows) > 1:
             print("Multiple matches found:")
             for r in rows:
-                print(f"  {r['run_id']} — {r['city_name']} — {r['status']} — {r['created_at']}")
+                print(f"  {r['run_id']} — {r['city_name']} — {r['run_status']} — {r['started_at']}")
             print("Provide a longer prefix to disambiguate.")
             sys.exit(1)
 
@@ -62,20 +62,20 @@ async def main(run_id_prefix: str) -> None:
         run_id = row["run_id"]
         print(f"Run: {run_id}")
         print(f"City: {row['city_name']}")
-        print(f"Current status: {row['status']}")
+        print(f"Current status: {row['run_status']}")
 
-        if row["status"] in ("failed", "complete"):
-            print(f"Status is already '{row['status']}' — nothing to do.")
+        if row["run_status"] in ("failed", "complete"):
+            print(f"Status is already '{row['run_status']}' — nothing to do.")
             return
 
         now = datetime.now(timezone.utc)
         await conn.execute(
             """
-            UPDATE runs
-            SET status = 'failed',
+            UPDATE agent_runs
+            SET run_status     = 'failed',
                 failure_reason = 'Orphaned — run was killed mid-execution',
                 completed_at   = $1
-            WHERE run_id = $2
+            WHERE run_id = $2::uuid
             """,
             now,
             run_id,

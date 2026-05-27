@@ -1,18 +1,40 @@
 # OSINT Ecosystem Intelligence System
-# All services run on a single host (Hetzner GPU VPS or local dev machine)
-# Start: docker compose up -d
-# Stop:  docker compose down
+# Full stack — all services on a single Hetzner GPU VPS
+#
+# Start:   docker compose up -d
+# Stop:    docker compose down
+# Logs:    docker compose logs -f api worker
+# Rebuild: docker compose build --no-cache api worker
+#
+# Required on host before first run:
+#   1. nvidia-container-toolkit installed (for GPU passthrough to Ollama)
+#   2. .env file populated (copy from .env.example and fill all values)
+#   3. Tunnel credentials JSON at path set by CLOUDFLARED_CREDS_DIR in .env
+#      File must be named: 1ed096ee-50d9-4ad1-b9c8-255aeccd28a4.json
+#   4. Pull Ollama models after first start:
+#      docker compose exec ollama ollama pull qwen3:14b
+#      docker compose exec ollama ollama pull qwen3:7b
+#      docker compose exec ollama ollama pull qwen3:22b
+#
+# Ports exposed to host (VPS firewall should block all except 80/443 via Cloudflare):
+#   7474  — Neo4j Browser (development only — close in production)
+#   7687  — Neo4j Bolt    (development only — close in production)
+#   8000  — FastAPI       (internal — should NOT be exposed; tunnel handles ingress)
+#   8001  — ChromaDB      (internal)
+#   6379  — Redis         (internal)
+#   11434 — Ollama        (internal)
 
 services:
 
-  # ─── Neo4j — Graph Database ────────────────────────────────────────────────
+  # ─── Infrastructure Layer ──────────────────────────────────────────────────
+
   neo4j:
     image: neo4j:5.18-community
     container_name: osint_neo4j
     restart: unless-stopped
     ports:
-      - "7474:7474"   # Browser UI
-      - "7687:7687"   # Bolt protocol (Python driver)
+      - "7474:7474"   # Browser UI (close in production)
+      - "7687:7687"   # Bolt protocol
     environment:
       NEO4J_AUTH: "neo4j/${NEO4J_PASSWORD}"
       NEO4J_PLUGINS: '["apoc"]'
@@ -28,13 +50,12 @@ services:
       timeout: 10s
       retries: 5
 
-  # ─── ChromaDB — Vector Database (Entity Resolution) ────────────────────────
   chromadb:
     image: chromadb/chroma:1.0.0
     container_name: osint_chromadb
     restart: unless-stopped
     ports:
-      - "8001:8000"   # ChromaDB HTTP API (client SDK 1.x requires /api/v2/)
+      - "8001:8000"
     environment:
       ANONYMIZED_TELEMETRY: "false"
       ALLOW_RESET: "true"
@@ -46,7 +67,6 @@ services:
       timeout: 10s
       retries: 5
 
-  # ─── Redis — Cache + Task Queue ────────────────────────────────────────────
   redis:
     image: redis:7.2-alpine
     container_name: osint_redis
@@ -67,11 +87,118 @@ services:
       timeout: 5s
       retries: 5
 
+  ollama:
+    image: ollama/ollama:latest
+    container_name: osint_ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    # GPU passthrough — requires nvidia-container-toolkit on the host.
+    # Remove the deploy block entirely if running CPU-only (dev only — too slow for 14b).
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 30s
+      timeout: 15s
+      retries: 5
+      start_period: 30s
+
+  # ─── Application Layer ─────────────────────────────────────────────────────
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: osint:latest
+    container_name: osint_api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"   # Internal only — do not expose to internet; tunnel handles ingress
+    env_file: .env
+    environment:
+      # Override connection strings to use Docker service names instead of localhost
+      REDIS_URL: "redis://redis:6379"
+      CHROMADB_HOST: "chromadb"
+      CHROMADB_PORT: "8000"
+      NEO4J_URI: "bolt://neo4j:7687"
+      OLLAMA_HOST: "http://ollama:11434"
+    depends_on:
+      redis:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+      chromadb:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 15s
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: osint:latest
+    container_name: osint_worker
+    restart: unless-stopped
+    # Override default CMD (uvicorn) to run the ARQ worker instead
+    command: ["python", "-m", "arq", "osint.workers.worker.WorkerSettings"]
+    env_file: .env
+    environment:
+      REDIS_URL: "redis://redis:6379"
+      CHROMADB_HOST: "chromadb"
+      CHROMADB_PORT: "8000"
+      NEO4J_URI: "bolt://neo4j:7687"
+      OLLAMA_HOST: "http://ollama:11434"
+    depends_on:
+      api:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+    # No healthcheck — ARQ workers don't expose HTTP.
+    # Monitor via: docker compose logs -f worker
+
+  # ─── Ingress Layer ─────────────────────────────────────────────────────────
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: osint_cloudflared
+    restart: unless-stopped
+    command: tunnel --config /etc/cloudflared/config.yml run
+    volumes:
+      # Tunnel config — points service at http://api:8000
+      - ./deploy/cloudflared-config.yml:/etc/cloudflared/config.yml:ro
+      # Tunnel credentials JSON — set CLOUDFLARED_CREDS_DIR in .env
+      # Must contain: 1ed096ee-50d9-4ad1-b9c8-255aeccd28a4.json
+      - ${CLOUDFLARED_CREDS_DIR}:/etc/cloudflared:ro
+    depends_on:
+      api:
+        condition: service_healthy
+    # Cloudflared has no HTTP health endpoint in default mode.
+    # Monitor via: docker compose logs -f cloudflared
+
+# ─── Volumes ─────────────────────────────────────────────────────────────────
+
 volumes:
   neo4j_data:
   neo4j_logs:
   chromadb_data:
   redis_data:
+  ollama_data:
+
+# ─── Networks ────────────────────────────────────────────────────────────────
 
 networks:
   default:

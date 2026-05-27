@@ -41,17 +41,15 @@ log_err()    { echo -e "${RED}[error]${NC}  $*"; }
 # Ctrl+C sends SIGINT to the group, cleanup() kills any stragglers.
 API_PID=""
 WORKER_LOOP_PID=""
+TUNNEL_PID=""
+CLOUDFLARED_CONFIG="$PROJECT_DIR/deploy/cloudflared-config.yml"
+
+log_tunnel() { echo -e "${MAGENTA}[tunnel]${NC} $*"; }
 
 cleanup() {
   echo ""
   log_info "Shutting down..."
-  # Kill the worker restart loop and its current worker child
-  if [[ -n "$WORKER_LOOP_PID" ]]; then
-    kill -- -$$ 2>/dev/null || true   # kill entire process group
-  fi
-  if [[ -n "$API_PID" ]]; then
-    kill "$API_PID" 2>/dev/null || true
-  fi
+  kill -- -$$ 2>/dev/null || true   # kill entire process group
   wait 2>/dev/null || true
   log_info "Done."
 }
@@ -60,7 +58,7 @@ trap cleanup EXIT INT TERM
 # ── 1. Docker services ─────────────────────────────────────────────────────────
 log_info "Starting Docker services..."
 cd "$PROJECT_DIR"
-docker compose up -d --quiet-pull 2>/dev/null || {
+docker compose up -d --quiet-pull redis neo4j 2>/dev/null || {
   log_err "Docker Compose failed. Is Docker Desktop running?"
   exit 1
 }
@@ -135,12 +133,34 @@ WORKER_LOOP_PID=$!
 sleep 3
 log_info "Worker running with auto-restart"
 
-# ── 5. If no city given, run in daemon mode ────────────────────────────────────
+# ── 5. Start Cloudflare Tunnel ─────────────────────────────────────────────────
+CLOUDFLARED_BIN=$(command -v cloudflared 2>/dev/null || true)
+if [[ -n "$CLOUDFLARED_BIN" && -f "$CLOUDFLARED_CONFIG" ]]; then
+  log_info "Starting Cloudflare Tunnel..."
+  (
+    "$CLOUDFLARED_BIN" tunnel --config "$CLOUDFLARED_CONFIG" run \
+      2>&1 | while IFS= read -r line; do log_tunnel "$line"; done
+  ) &
+  TUNNEL_PID=$!
+  sleep 2
+  if kill -0 "$TUNNEL_PID" 2>/dev/null; then
+    log_info "Tunnel running → https://api.finitebuilds.com"
+  else
+    log_info "Tunnel failed to start — continuing without it (local access still works)"
+  fi
+elif [[ -z "$CLOUDFLARED_BIN" ]]; then
+  log_info "cloudflared not found — skipping tunnel (local only)"
+else
+  log_info "Tunnel config not found at $CLOUDFLARED_CONFIG — skipping"
+fi
+
+# ── 6. If no city given, run in daemon mode ────────────────────────────────────
 if [[ -z "$CITY" ]]; then
   echo ""
   echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
   echo -e "${GREEN}  OSINT pipeline running (daemon mode)${NC}"
-  echo -e "${GREEN}  API:    $BASE_URL${NC}"
+  echo -e "${GREEN}  Local:   $BASE_URL${NC}"
+  [[ -n "$TUNNEL_PID" ]] && echo -e "${GREEN}  Public:  https://finitebuilds.com${NC}"
   echo -e "${GREEN}  Trigger: ./go.sh \"City\" \"Country\"${NC}"
   echo -e "${GREEN}  Stop:    Ctrl+C${NC}"
   echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
@@ -159,7 +179,7 @@ if [[ -z "$CITY" ]]; then
   exit 0
 fi
 
-# ── 6. Trigger run ─────────────────────────────────────────────────────────────
+# ── 7. Trigger run ─────────────────────────────────────────────────────────────
 echo ""
 log_run "Triggering run: ${BOLD}$CITY, $COUNTRY${NC}"
 
@@ -182,7 +202,7 @@ fi
 log_run "Queued — run_id: ${DIM}$RUN_ID${NC}"
 echo ""
 
-# ── 7. Poll for completion ─────────────────────────────────────────────────────
+# ── 8. Poll for completion ─────────────────────────────────────────────────────
 POLL_INTERVAL=15
 ELAPSED=0
 LAST_STATUS=""

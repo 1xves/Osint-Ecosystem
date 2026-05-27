@@ -578,7 +578,20 @@ class RelationshipAgent(BaseAgent):
         rb: _RelBuilder,
         run_id: str,
     ) -> None:
-        """investor → corporate/nonprofit: from portfolio_companies."""
+        """
+        investor → corporate/nonprofit: two extraction paths.
+
+        Path 1 (investor-side): investor.category_fields["portfolio_companies"]
+          — populated if enrichment fetches per-investor portfolio detail.
+          Currently empty for most runs; kept for future enrichment.
+
+        Path 2 (corporate-side): corporate.category_fields["investors_list"]
+          — populated by corporate_agent when Crunchbase returns "investors"
+          field in bulk search results (Basic tier may return this).
+          For each corporate entity that lists its investors, we emit the
+          reverse INVESTED_IN edge (investor → corporate).
+        """
+        # ── Path 1: investor-side portfolio_companies ─────────────────────────
         for investor in by_type.get("investor", []):
             cat = investor.get("category_fields", {})
             portfolio = cat.get("portfolio_companies") or []
@@ -591,7 +604,6 @@ class RelationshipAgent(BaseAgent):
             for company_name in portfolio:
                 if not company_name:
                     continue
-                # Try corporate first, then nonprofit
                 target = (
                     _find_by_name(name_index, company_name, "corporate")
                     or _find_by_name(name_index, company_name, "nonprofit")
@@ -607,6 +619,41 @@ class RelationshipAgent(BaseAgent):
                             f"{target.get('canonical_name')} (portfolio company)"
                         ),
                         source_url=source_url,
+                        source_quality="primary",
+                        confidence="high",
+                        run_id=run_id,
+                    )
+
+        # ── Path 2: corporate-side investors_list (reverse lookup) ────────────
+        # corporate_agent stores the investor names Crunchbase reports for each
+        # company. We match those names against investor entities in the run.
+        for corp in by_type.get("corporate", []):
+            cat = corp.get("category_fields", {})
+            investors_list = cat.get("investors_list") or []
+            if not isinstance(investors_list, list):
+                continue
+
+            corp_source_urls = corp.get("source_urls", [])
+            corp_source_url  = corp_source_urls[0] if corp_source_urls else SOURCE_URL_FALLBACKS["crunchbase"]
+
+            for investor_name in investors_list:
+                if not investor_name:
+                    continue
+                # Match against investor entities first, then executive_hnw (angel investors)
+                source_entity = (
+                    _find_by_name(name_index, investor_name, "investor")
+                    or _find_by_name(name_index, investor_name, "executive_hnw")
+                )
+                if source_entity:
+                    rb.add(
+                        source_entity=source_entity,
+                        target_entity=corp,
+                        rel_type="INVESTED_IN",
+                        evidence_snippet=(
+                            f"{source_entity.get('canonical_name')} invested in "
+                            f"{corp.get('canonical_name')} (Crunchbase investor record)"
+                        ),
+                        source_url=corp_source_url,
                         source_quality="primary",
                         confidence="high",
                         run_id=run_id,
