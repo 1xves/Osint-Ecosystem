@@ -72,4 +72,4 @@ CREATE INDEX IF NOT EXISTS idx_agent_runs_run_mode
   ON agent_runs (run_mode, run_status);
 
 CREATE INDEX IF NOT EXISTS idx_agent_runs_scheduled
-  ON agent_runs (scheduled, triggered_at DESC);
+  ON agent_runs (scheduled, started_at DESC);
