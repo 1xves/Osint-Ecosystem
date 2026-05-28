@@ -208,6 +208,219 @@ class BaseAgent(ABC):
         return await self._llm.embed(text)
 
     # ─────────────────────────────────────────────────────────────────────────
+    # Entity name validation
+    # ─────────────────────────────────────────────────────────────────────────
+
+    # Phrases that appear in list-article titles but never in real entity names
+    _GARBAGE_FRAGMENTS: tuple[str, ...] = (
+        "top ", "best ", "largest ", "biggest ", "leading ",
+        "list of ", "list:", "overview of ", "guide to ",
+        "based ", "-based ", "angel investment group",
+        "venture capital firm", "private equity firm",
+        "investment group", "investment fund",   # too generic
+        "action committee",                       # "Political action committee"
+        "law firm",                               # generic category
+        "real estate developer",                  # category
+        " investors in ",
+        " firms in ",
+        " companies in ",
+        "272 largest", "500 list", "fortune 500",
+        " 's ", "s '",                            # possessive in article titles
+    )
+
+    # Exact names that are geographic/categorical, not entities
+    _GARBAGE_EXACT: frozenset[str] = frozenset({
+        "pennsylvania", "philadelphia", "new jersey", "delaware",
+        "united states", "america", "usa",
+        "political action committee", "pac",
+        "limited partnership", "llc", "inc", "corp", "corporation",
+        "venture capital", "private equity", "angel investor",
+    })
+
+    @staticmethod
+    def is_garbage_entity_name(name: str) -> bool:
+        """
+        Return True if `name` looks like a search-result artifact rather than
+        a real named entity.
+
+        Catches:
+          - List/article titles  ("Top 10 VC Investors in Philadelphia")
+          - Pure geographic terms ("Pennsylvania", "Philadelphia")
+          - Generic category labels ("Political action committee")
+          - Implausibly long names (>80 chars — likely a headline)
+          - Single lowercase words (never a proper organisation name)
+
+        Callers should drop the entity when this returns True.
+        """
+        if not name:
+            return True
+        stripped = name.strip()
+        if len(stripped) > 80:
+            return True
+        lower = stripped.lower()
+        if lower in BaseAgent._GARBAGE_EXACT:
+            return True
+        for fragment in BaseAgent._GARBAGE_FRAGMENTS:
+            if fragment in lower:
+                return True
+        # Single token, all-lowercase → not a proper noun
+        if " " not in stripped and stripped == stripped.lower():
+            return True
+        # Starts with a digit → likely "10th Congressional..." category
+        if stripped[0].isdigit():
+            return False   # numeric-prefix names CAN be real (e.g. "3M")
+        return False
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Seed-first collection
+    # ─────────────────────────────────────────────────────────────────────────
+
+    async def _collect_from_seeds(
+        self,
+        entity_type: str,
+        city_name: str,
+        run_id: str,
+    ) -> list[dict[str, Any]]:
+        """
+        Load curated seed entities for the given type and wrap them in full entity dicts.
+
+        Seeds are loaded from osint.seeds.philadelphia (or the appropriate city module).
+        Called BEFORE SerpAPI/Crunchbase discovery in every collection agent so that
+        real, named entities with pre-populated category_fields enter every run
+        unconditionally — regardless of whether external APIs are reachable.
+
+        Returns an empty list if no seeds are defined for this entity_type.
+        """
+        # Lazy import avoids any circular-import risk at module load time
+        try:
+            from osint.seeds.philadelphia import load_seeds  # noqa: PLC0415
+        except ImportError as exc:
+            log.warning(
+                "%s: seed module unavailable (%s) — skipping seed load",
+                self.AGENT_NAME, exc,
+            )
+            return []
+
+        seeds = load_seeds(entity_type, city_name)
+        if not seeds:
+            log.debug(
+                "%s: no seeds defined for entity_type=%s", self.AGENT_NAME, entity_type
+            )
+            return []
+
+        now = datetime.now(timezone.utc).isoformat()
+        entities: list[dict[str, Any]] = []
+
+        for seed in seeds:
+            canonical_name = seed.get("canonical_name", "")
+            if not canonical_name:
+                continue
+
+            # Build external_ids from whichever identifier keys exist on this seed
+            external_ids: dict[str, str] = {}
+            if sec_cik := seed.get("sec_cik"):
+                external_ids["sec_cik"] = str(sec_cik)
+            if ein := seed.get("ein"):
+                external_ids["ein"] = str(ein)
+            if fec_id := seed.get("fec_candidate_id"):
+                external_ids["fec_candidate_id"] = str(fec_id)
+            if cb_id := seed.get("crunchbase_id"):
+                external_ids["crunchbase_id"] = str(cb_id)
+
+            source_url = seed.get("website_url") or ""
+
+            entity: dict[str, Any] = {
+                "entity_id": None,
+                "canonical_name": canonical_name,
+                "entity_type": seed.get("entity_type", entity_type),
+                "entity_subtype": seed.get("entity_subtype"),
+                "aliases": list(seed.get("aliases", [])),
+                "valid_from": now,
+                "valid_to": None,
+                "superseded_by": None,
+
+                "primary_city": seed.get("primary_city", city_name),
+                "primary_city_status": seed.get("primary_city_status", "REPORTED"),
+                "primary_state": seed.get("primary_state"),
+                "primary_state_status": seed.get("primary_state_status", "NOT_COLLECTED"),
+                "primary_country": seed.get("primary_country", "United States"),
+                "primary_country_status": seed.get("primary_country_status", "REPORTED"),
+
+                "website_url": seed.get("website_url"),
+                "website_url_status": "REPORTED" if seed.get("website_url") else "NOT_COLLECTED",
+                "linkedin_url": seed.get("linkedin_url"),
+                "linkedin_url_status": "REPORTED" if seed.get("linkedin_url") else "NOT_COLLECTED",
+                "twitter_handle": seed.get("twitter_handle"),
+                "twitter_handle_status": "REPORTED" if seed.get("twitter_handle") else "NOT_COLLECTED",
+
+                "description": seed.get("description"),
+                "description_status": "REPORTED" if seed.get("description") else "NOT_COLLECTED",
+                "description_source_url": source_url or None,
+
+                "external_ids": external_ids,
+                "source_agent": self.AGENT_NAME,
+                "source_run_ids": [run_id],
+                "merge_provenance": [],
+                "source_urls": ([source_url] if source_url else []),
+                "last_seen": now,
+                "last_verified": None,
+
+                # Seeds are hand-curated anchor entities — mark as high confidence
+                "overall_confidence": "high",
+                "source_count": 1,
+                "corroboration_count": 0,
+
+                "partner_candidate": False,
+                "competitor_candidate": False,
+                "blocker_candidate": False,
+                "investment_candidate": False,
+                "support_candidate": False,
+                "recruiter_candidate": False,
+                "top_influencer": False,
+
+                "score_influence": 0,
+                "score_startup_relevance": 0,
+                "score_partner_potential": 0,
+                "score_supporter_potential": 0,
+                "score_competitor_potential": 0,
+                "score_blocker_risk": 0,
+                "score_investment_potential": 0,
+                "score_support_target": 0,
+                "score_recruiting_potential": 0,
+
+                "needs_review": False,
+                "sensitivity_tier": "standard",
+
+                # Pre-populated relationship-relevant fields — this is the core value
+                # of seeds: the relationship agent gets cross-entity data immediately
+                # (current_company → EMPLOYED_BY, portfolio_companies → INVESTED_IN,
+                #  founder_names → FOUNDED, board_seats → SITS_ON_BOARD_OF, etc.)
+                "category_fields": dict(seed.get("category_fields", {})),
+
+                "_raw_entity_id": str(uuid.uuid4()),
+                "_source": "seed",
+                "_is_seed": True,
+                "_pending_evidence": [],  # Seeds need no additional evidence records
+            }
+            entities.append(entity)
+
+        log.info(
+            "%s: loaded %d seed entities (entity_type=%s, city=%s)",
+            self.AGENT_NAME, len(entities), entity_type, city_name,
+        )
+
+        # One search_record for the entire seed load — not one per entity
+        await self.write_search_record(
+            source_searched="seed_list",
+            query_used=f"curated seeds for {entity_type} in {city_name}",
+            result_found=bool(entities),
+            entity_type=entity_type,
+            result_count=len(entities),
+        )
+
+        return entities
+
+    # ─────────────────────────────────────────────────────────────────────────
     # DB write helpers
     # ─────────────────────────────────────────────────────────────────────────
 

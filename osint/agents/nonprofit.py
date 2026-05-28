@@ -125,6 +125,16 @@ class NonprofitAgent(BaseAgent):
                     targeted_queries.extend(target.get("suggested_queries", []))
             targeted_queries = [q for q in targeted_queries if q]
 
+        # ── Source 0: Curated seeds (always runs first, API-independent) ───────
+        # Load both nonprofit and philanthropic seeds — both are handled by this agent
+        for seed_type in ("nonprofit", "philanthropic"):
+            seed_entities = await self._collect_from_seeds(seed_type, city_name, run_id)
+            new_raw_entities.extend(seed_entities)
+            log.info(
+                "NonprofitAgent: Seeds yielded %d entities (type=%s)",
+                len(seed_entities), seed_type,
+            )
+
         # ── Source 1: ProPublica ──────────────────────────────────────────────
         pp_entities = await self._collect_from_propublica(city_name, run_id)
         new_raw_entities.extend(pp_entities)

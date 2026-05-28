@@ -69,6 +69,14 @@ Never fabricate information — only extract what is explicitly stated in the so
 
 SERPAPI_EXTRACTION_PROMPT = """Extract investor information from this search result.
 
+CRITICAL — "name" field rules:
+- MUST be a specific, proper-noun organization or individual name.
+  Good: "First Round Capital", "Josh Kopelman", "Safeguard Scientifics"
+  Bad:  "Top 10 VCs in Philadelphia", "Best Venture Capital Firms", "Investors in PA"
+- Article titles, list headings, rankings, and generic category labels are NOT valid names.
+- If this search result is an article listing multiple investors rather than describing
+  one specific named investor, return null for "name".
+
 City context: {city_name}
 
 Search result:
@@ -78,14 +86,14 @@ Search result:
 
 Return a JSON object:
 {{
-  "name": "<organization or individual name, or null>",
+  "name": "<specific proper-noun organization or individual name, or null if this is a list/article>",
   "entity_subtype": "<vc|angel|family_office|pe|corporate_vc|syndicate|null>",
   "description": "<brief factual description from the source text, or null>",
   "website_url": "<if present in text, or null>",
   "linkedin_url": "<if present in text, or null>",
   "investment_stage_focus": ["<stages mentioned, or empty list>"],
   "sector_focus": ["<sectors mentioned, or empty list>"],
-  "managing_partner": "<if named, or null>",
+  "managing_partner": "<if a specific partner name is stated, or null>",
   "is_local": "<true if this investor is based in {city_name}, false if only investing there, null if unclear>",
   "evidence_snippet": "<exact quote from the text that supports this being an investor in {city_name}>"
 }}"""
@@ -131,6 +139,11 @@ class InvestorAgent(BaseAgent):
             targeted_queries = [q for q in targeted_queries if q]
             if targeted_queries:
                 log.info("InvestorAgent: Pass 2 — %d targeted queries", len(targeted_queries))
+
+        # ── Source 0: Curated seeds (always runs first, API-independent) ───────
+        seed_entities = await self._collect_from_seeds("investor", city_name, run_id)
+        new_raw_entities.extend(seed_entities)
+        log.info("InvestorAgent: Seeds yielded %d entities", len(seed_entities))
 
         # ── Source 1: Crunchbase ───────────────────────────────────────────────
         cb_entities = await self._collect_from_crunchbase(
@@ -513,6 +526,13 @@ class InvestorAgent(BaseAgent):
         name = extracted_json.get("name")
         evidence_snippet = extracted_json.get("evidence_snippet")
         if not name or not evidence_snippet:
+            return None
+
+        # Reject list-article artifacts that slipped through the prompt instruction
+        if self.is_garbage_entity_name(name):
+            log.debug(
+                "InvestorAgent: dropped garbage name from SerpAPI extraction: %r", name
+            )
             return None
 
         source_url = result.get("link", "")

@@ -128,6 +128,11 @@ class CorporateAgent(BaseAgent):
                     targeted_queries.extend(target.get("suggested_queries", []))
             targeted_queries = [q for q in targeted_queries if q]
 
+        # ── Source 0: Curated seeds (always runs first, API-independent) ───────
+        seed_entities = await self._collect_from_seeds("corporate", city_name, run_id)
+        new_raw_entities.extend(seed_entities)
+        log.info("CorporateAgent: Seeds yielded %d entities", len(seed_entities))
+
         # ── Source 1: Crunchbase ──────────────────────────────────────────────
         cb_entities = await self._collect_from_crunchbase(
             city_name, country_or_region, run_id

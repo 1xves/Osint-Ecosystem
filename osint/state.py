@@ -54,6 +54,11 @@ class OSINTRunState(TypedDict, total=False):
 
     # ─── Pipeline Control ─────────────────────────────────────────────────────
     run_status: Literal["pending", "running", "complete", "failed", "partial"]
+    run_mode: Literal["full", "enrichment_refresh", "discovery_pass"]
+    # run_mode controls graph routing:
+    #   "full"               — full collection → analytical pipeline (default)
+    #   "enrichment_refresh" — skip collection, load existing DB entities, re-enrich
+    #   "discovery_pass"     — full collection (same as "full", aliased for clarity)
     current_phase: Literal[
         "INIT", "COLLECTION_PASS1", "GAP_ANALYSIS", "COLLECTION_PASS2",
         "RESOLUTION", "ENRICHMENT", "RELATIONSHIP", "SCORING",
@@ -137,6 +142,7 @@ def initial_state(
     operator_id: str,
     triggered_at: str,
     state_abbr: str = "",
+    run_mode: str = "full",
 ) -> OSINTRunState:
     """
     Returns a fully initialized OSINTRunState with all fields set to
@@ -199,6 +205,7 @@ def initial_state(
 
         # Pipeline control
         run_status="pending",
+        run_mode=run_mode,
         current_phase="INIT",
         pass_number=1,
         gate_cleared=False,

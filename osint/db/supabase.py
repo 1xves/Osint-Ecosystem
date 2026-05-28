@@ -102,17 +102,22 @@ class SupabaseClient:
                 """
                 INSERT INTO agent_runs (
                     run_id, city_name, country_or_region, city_key,
-                    run_status, model_default, model_escalation,
+                    run_status, run_mode, run_type, scheduled,
+                    model_default, model_escalation,
                     triggered_by, trigger_type, is_delta_run, previous_run_id,
                     started_at
                 ) VALUES (
                     $1::uuid, $2, $3, $4,
-                    $5, $6, $7,
-                    $8, $9, $10, $11::uuid,
+                    $5, $6, $7, $8,
+                    $9, $10,
+                    $11, $12, $13, $14::uuid,
                     NOW()
                 )
                 ON CONFLICT (run_id) DO UPDATE SET
                     run_status      = EXCLUDED.run_status,
+                    run_mode        = EXCLUDED.run_mode,
+                    run_type        = EXCLUDED.run_type,
+                    scheduled       = EXCLUDED.scheduled,
                     completed_at    = EXCLUDED.completed_at,
                     duration_seconds = EXCLUDED.duration_seconds,
                     total_entities_found      = COALESCE(EXCLUDED.total_entities_found, agent_runs.total_entities_found),
@@ -126,6 +131,9 @@ class SupabaseClient:
                 run.get("country_or_region", "United States"),
                 run["city_key"],
                 run.get("run_status", "pending"),
+                run.get("run_mode", "full"),
+                run.get("run_type", "manual"),
+                run.get("scheduled", False),
                 run.get("model_default", settings.ollama_default_model),
                 run.get("model_escalation", settings.ollama_escalation_model),
                 run.get("triggered_by"),
@@ -543,6 +551,99 @@ class SupabaseClient:
                     run_id,
                 )
             return [dict(r) for r in rows]
+
+    async def get_entities_by_city(
+        self,
+        city_name: str,
+        stale_only: bool = False,
+        stale_hours: int = 12,
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        """
+        Fetch all live entities for a city, used by the enrichment refresh scheduler.
+
+        Args:
+            city_name:    City name as stored in entities.primary_city, e.g. "Philadelphia".
+            stale_only:   If True, only return entities where last_verified is
+                          older than stale_hours or NULL (never verified).
+            stale_hours:  Staleness threshold in hours (default 12).
+            limit:        Cap on the number of entities returned (default 500).
+
+        Returns:
+            List of entity dicts with all columns, including category_fields
+            decoded from JSONB to Python dict.
+        """
+        import json as _json  # local import to avoid polluting module namespace
+
+        pool = self._pool_required()
+        async with pool.acquire() as conn:
+            if stale_only:
+                rows = await conn.fetch(
+                    """
+                    SELECT *
+                    FROM   entities
+                    WHERE  primary_city = $1
+                      AND  valid_to IS NULL
+                      AND  (
+                             last_verified IS NULL
+                             OR last_verified < NOW() - ($2 || ' hours')::INTERVAL
+                           )
+                    ORDER BY score_influence DESC NULLS LAST
+                    LIMIT $3
+                    """,
+                    city_name,
+                    str(stale_hours),
+                    limit,
+                )
+            else:
+                rows = await conn.fetch(
+                    """
+                    SELECT *
+                    FROM   entities
+                    WHERE  primary_city = $1
+                      AND  valid_to IS NULL
+                    ORDER BY score_influence DESC NULLS LAST
+                    LIMIT $2
+                    """,
+                    city_name,
+                    limit,
+                )
+
+            result = []
+            for row in rows:
+                d = dict(row)
+                # asyncpg may return JSONB as a string — normalise to dict
+                if isinstance(d.get("category_fields"), str):
+                    d["category_fields"] = _json.loads(d["category_fields"])
+                elif d.get("category_fields") is None:
+                    d["category_fields"] = {}
+                if isinstance(d.get("external_ids"), str):
+                    d["external_ids"] = _json.loads(d["external_ids"])
+                elif d.get("external_ids") is None:
+                    d["external_ids"] = {}
+                # UUID fields → string
+                for fld in ("entity_id", "run_id"):
+                    if d.get(fld) is not None:
+                        d[fld] = str(d[fld])
+                result.append(d)
+            return result
+
+    async def update_entity_last_verified(
+        self,
+        entity_id: str,
+        run_id: str,
+    ) -> None:
+        """Stamp last_verified = NOW() on an entity after a refresh run."""
+        pool = self._pool_required()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE entities
+                SET    last_verified = NOW()
+                WHERE  entity_id = $1::uuid
+                """,
+                entity_id,
+            )
 
     # ─────────────────────────────────────────────────────────────────────────
     # entity_evidence table
@@ -1054,32 +1155,30 @@ class SupabaseClient:
         pool = self._pool_required()
 
         async with pool.acquire() as conn:
-            entity_rows, rel_row = await asyncio.gather(
-                conn.fetch(
-                    """
-                    SELECT
-                        entity_type,
-                        COUNT(*)                                              AS n,
-                        COUNT(*) FILTER (WHERE partner_candidate    = TRUE)   AS partners,
-                        COUNT(*) FILTER (WHERE blocker_candidate    = TRUE)   AS blockers,
-                        COUNT(*) FILTER (WHERE top_influencer       = TRUE)   AS influencers,
-                        COUNT(*) FILTER (WHERE investment_candidate = TRUE)   AS investments,
-                        COUNT(*) FILTER (WHERE competitor_candidate = TRUE)   AS competitors
-                    FROM entities
-                    WHERE $1::uuid = ANY(source_run_ids)
-                      AND valid_to IS NULL
-                    GROUP BY entity_type
-                    """,
-                    run_id,
-                ),
-                conn.fetchrow(
-                    """
-                    SELECT COUNT(*) AS n
-                    FROM relationships
-                    WHERE run_id = $1::uuid
-                    """,
-                    run_id,
-                ),
+            entity_rows = await conn.fetch(
+                """
+                SELECT
+                    entity_type,
+                    COUNT(*)                                              AS n,
+                    COUNT(*) FILTER (WHERE partner_candidate    = TRUE)   AS partners,
+                    COUNT(*) FILTER (WHERE blocker_candidate    = TRUE)   AS blockers,
+                    COUNT(*) FILTER (WHERE top_influencer       = TRUE)   AS influencers,
+                    COUNT(*) FILTER (WHERE investment_candidate = TRUE)   AS investments,
+                    COUNT(*) FILTER (WHERE competitor_candidate = TRUE)   AS competitors
+                FROM entities
+                WHERE $1::uuid = ANY(source_run_ids)
+                  AND valid_to IS NULL
+                GROUP BY entity_type
+                """,
+                run_id,
+            )
+            rel_row = await conn.fetchrow(
+                """
+                SELECT COUNT(*) AS n
+                FROM relationships
+                WHERE run_id = $1::uuid
+                """,
+                run_id,
             )
 
         by_type: dict[str, int] = {}

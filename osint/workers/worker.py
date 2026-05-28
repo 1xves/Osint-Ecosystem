@@ -49,6 +49,7 @@ from osint.graph.graph import build_graph
 from osint.llm.ollama import OllamaClient
 from osint.llm.routing import LLMRouter
 from osint.state import initial_state
+from osint.scheduler import run_enrichment_refresh, run_weekly_discovery
 
 log = logging.getLogger(__name__)
 
@@ -280,18 +281,42 @@ class WorkerSettings:
 
     Key settings:
         functions     — list of task functions this worker handles
+        cron_jobs     — scheduled recurring tasks (enrichment refresh + weekly discovery)
         on_startup    — called once on process start
         on_shutdown   — called once on process exit
         health_check  — called every health_check_interval seconds
         max_jobs      — max concurrent jobs per worker process
         job_timeout   — seconds before a job is killed (default 300)
         keep_result   — seconds to keep job result in Redis
+
+    Continuous pipeline schedule:
+        Every 6 hours:    run_enrichment_refresh  — re-enrich known entities, re-infer rels
+        Mondays 2:00 AM:  run_weekly_discovery    — full collection pass for all cities
     """
 
     redis_settings = arq.connections.RedisSettings.from_dsn(settings.redis_url)
 
-    # Task functions this worker handles
+    # Task functions this worker handles (on-demand)
     functions = [run_osint_pipeline]
+
+    # Cron tasks — continuous pipeline scheduler
+    # run_enrichment_refresh: every 6 hours (0:00, 6:00, 12:00, 18:00 UTC)
+    # run_weekly_discovery:   Mondays at 2:00 AM UTC
+    cron_jobs = [
+        cron(
+            run_enrichment_refresh,
+            hour={0, 6, 12, 18},
+            minute=0,
+            job_id="enrichment_refresh",    # stable ID prevents duplicate queuing
+        ),
+        cron(
+            run_weekly_discovery,
+            weekday=0,                       # Monday
+            hour=2,
+            minute=0,
+            job_id="weekly_discovery",
+        ),
+    ]
 
     # Lifecycle hooks
     on_startup  = startup
@@ -299,11 +324,13 @@ class WorkerSettings:
     health_check = health_check
     health_check_interval = 60   # seconds
 
-    # Concurrency — OSINT runs are GPU-bound; 2 is safe on a 24GB GPU VPS
-    max_jobs = 2
+    # Concurrency — OSINT runs are GPU-bound; 2 is safe on a 24GB GPU VPS.
+    # Enrichment refresh jobs are lighter (no collection) so they can run
+    # alongside a full discovery pass safely.
+    max_jobs = 3
 
-    # Timeout — 4 hours. A full 15-agent run with Pass 2 can take 60–90 min.
-    # Set conservatively to avoid killing legitimate long runs.
+    # Timeout — 4 hours for full runs, 2 hours is more than enough for refresh.
+    # ARQ doesn't support per-function timeouts, so we use the max safe value.
     job_timeout = 60 * 60 * 4   # 4 hours in seconds
 
     # Keep job result in Redis for 24 hours

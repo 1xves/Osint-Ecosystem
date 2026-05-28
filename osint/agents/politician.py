@@ -142,6 +142,11 @@ class PoliticianAgent(BaseAgent):
                     targeted_queries.extend(target.get("suggested_queries", []))
             targeted_queries = [q for q in targeted_queries if q]
 
+        # ── Source 0: Curated seeds (always runs first, API-independent) ───────
+        seed_entities = await self._collect_from_seeds("politician", city_name, run_id)
+        new_raw_entities.extend(seed_entities)
+        log.info("PoliticianAgent: Seeds yielded %d entities", len(seed_entities))
+
         # ── Source 1: ProPublica Congress ──────────────────────────────────────
         pp_entities = await self._collect_from_propublica(
             city_name, state_abbr, run_id
