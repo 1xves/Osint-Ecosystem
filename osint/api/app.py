@@ -249,10 +249,12 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
+        "https://finitebuilds.com",
+        "https://www.finitebuilds.com",
+        "https://vk-osint-frontend.pages.dev",
         "https://vk-osint.com",
         "https://www.vk-osint.com",
-        "https://api.vk-osint.com",
-        # Local dev — remove before production if not needed
+        # Local dev
         "http://localhost:3000",
         "http://localhost:8080",
     ],
