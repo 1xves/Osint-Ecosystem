@@ -66,7 +66,12 @@ class Settings(BaseSettings):
     opencorporates_api_key: str = ""    # Optional — increases rate limit
 
     # ─── Research Pipeline ────────────────────────────────────────────────────
-    research_pipeline_url: str = "http://localhost:5050"
+    # PIPELINE_DATABASE_URL: direct asyncpg connection to the pipeline's Supabase project
+    # (wuojatgaxkeqpubsvrrg — separate from OSINT project gdiuwayqjrejwosuxmel).
+    # The PipelineAgent queries synthesis + extractions tables directly instead of
+    # going through the Flask API at localhost:5050.
+    pipeline_database_url: str = ""
+    research_pipeline_url: str = "http://localhost:5050"   # kept for backward compat / fallback
     research_pipeline_api_key: str = ""
 
     # ─── Budget Controls ──────────────────────────────────────────────────────
